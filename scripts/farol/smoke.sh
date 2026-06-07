@@ -7,7 +7,8 @@ PORT="${PORT:-8080}"
 BASE_URL="http://${PIXEL_HOST}:${PORT}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-KEY_FILE="$REPO_ROOT/.farol/farol.key"
+# FAROL_KEY_FILE env overrides the default key location (used by smoke_test.sh — never touch the real key)
+KEY_FILE="${FAROL_KEY_FILE:-$REPO_ROOT/.farol/farol.key}"
 
 if [[ ! -f "$KEY_FILE" ]]; then
   echo "[smoke] ERROR: key file not found at $KEY_FILE — run push-key.sh first" >&2

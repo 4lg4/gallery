@@ -9,12 +9,12 @@ MOCK_PORT=18099
 MOCK_HOST=127.0.0.1
 MOCK_PID=""
 MOCK_PY="$REPO_ROOT/.farol/mock_server.py"
-TEST_KEY_LINK="$REPO_ROOT/.farol/farol.key"
+TEST_KEY="$REPO_ROOT/.farol/smoke_test.key"
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 cleanup() {
   [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true
-  rm -f "$REPO_ROOT/.farol/smoke_test.key" "$REPO_ROOT/.farol/smoke_test.png" "$MOCK_PY" "$TEST_KEY_LINK"
+  rm -f "$REPO_ROOT/.farol/smoke_test.key" "$REPO_ROOT/.farol/smoke_test.png" "$MOCK_PY"
 }
 trap cleanup EXIT
 
@@ -179,23 +179,12 @@ wait_for_server() {
   return 1
 }
 
-# Install test key as the farol.key smoke.sh will read
-install_key() {
-  ln -sf "$REPO_ROOT/.farol/smoke_test.key" "$TEST_KEY_LINK"
-}
-remove_key() {
-  rm -f "$TEST_KEY_LINK"
-}
 
 # ── POSITIVE test ─────────────────────────────────────────────────────────────
 echo "=== POSITIVE TEST (mock returns correct responses) ==="
 start_mock pass
 wait_for_server
-install_key
-
-PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE" "$TEST_IMAGE"
-
-remove_key
+FAROL_KEY_FILE="$TEST_KEY" FAROL_KEY_FILE="$TEST_KEY" PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE" "$TEST_IMAGE"
 stop_mock
 
 echo ""
@@ -206,14 +195,12 @@ echo ""
 echo "=== NEGATIVE TEST (mock returns wrong completion → smoke must FAIL) ==="
 start_mock fail
 wait_for_server
-install_key
 
 set +e
-PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE" "$TEST_IMAGE" 2>&1
+FAROL_KEY_FILE="$TEST_KEY" PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE" "$TEST_IMAGE" 2>&1
 SMOKE_EXIT=$?
 set -e
 
-remove_key
 stop_mock
 
 if [[ $SMOKE_EXIT -ne 0 ]]; then
