@@ -16,6 +16,9 @@
 
 package com.google.ai.edge.gallery.farol
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
@@ -23,19 +26,40 @@ import android.os.IBinder
 /**
  * FAROL — LAN LLM inference server foreground service.
  *
- * TODO: Task 2 — embed Ktor CIO server, create notification channel, bind engine.
+ * TODO: Task 2 — embed Ktor CIO server, bind engine.
  */
 class FarolService : Service() {
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // TODO: Task 2 — start Ktor server and post foreground notification.
-        return START_STICKY
+  override fun onCreate() {
+    super.onCreate()
+    val manager = getSystemService(NotificationManager::class.java)
+    if (manager.getNotificationChannel(CHANNEL_ID) == null) {
+      manager.createNotificationChannel(
+        NotificationChannel(CHANNEL_ID, "FAROL server", NotificationManager.IMPORTANCE_LOW)
+      )
     }
+  }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        // TODO: Task 2 — stop Ktor server.
-    }
+  override fun onBind(intent: Intent?): IBinder? = null
+
+  override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    val notification =
+      Notification.Builder(this, CHANNEL_ID)
+        .setContentTitle("FAROL server")
+        .setSmallIcon(android.R.drawable.ic_menu_share)
+        .build()
+    startForeground(NOTIFICATION_ID, notification)
+    // TODO: Task 2 — start Ktor server.
+    return START_STICKY
+  }
+
+  override fun onDestroy() {
+    super.onDestroy()
+    // TODO: Task 2 — stop Ktor server.
+  }
+
+  companion object {
+    private const val CHANNEL_ID = "farol_server"
+    private const val NOTIFICATION_ID = 1001
+  }
 }
