@@ -17,6 +17,7 @@
 package com.google.ai.edge.gallery.farol.server.routes
 
 import com.google.ai.edge.gallery.farol.engine.InferenceEngine
+import com.google.ai.edge.gallery.farol.engine.StreamChunk
 import com.google.ai.edge.gallery.farol.openai.AssistantMessage
 import com.google.ai.edge.gallery.farol.openai.ChatCompletionChunk
 import com.google.ai.edge.gallery.farol.openai.ChatCompletionRequest
@@ -26,9 +27,13 @@ import com.google.ai.edge.gallery.farol.openai.ChunkChoice
 import com.google.ai.edge.gallery.farol.openai.Delta
 import com.google.ai.edge.gallery.farol.openai.ErrorBody
 import com.google.ai.edge.gallery.farol.openai.ErrorResponse
+import com.google.ai.edge.gallery.farol.openai.FunctionCallOut
 import com.google.ai.edge.gallery.farol.openai.OpenAIDecoder
 import com.google.ai.edge.gallery.farol.openai.OpenAIJson
 import com.google.ai.edge.gallery.farol.openai.PromptFlattener
+import com.google.ai.edge.gallery.farol.openai.ToolCallOut
+import com.google.ai.edge.gallery.farol.openai.ToolCallParser
+import com.google.ai.edge.gallery.farol.openai.ToolPromptBuilder
 import com.google.ai.edge.gallery.farol.openai.Usage
 import com.google.ai.edge.gallery.farol.server.Auth
 import com.google.ai.edge.gallery.farol.server.FarolEndpoint
@@ -45,10 +50,11 @@ import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
-import com.google.ai.edge.gallery.farol.engine.StreamChunk
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 private const val DEFAULT_MAX_TOKENS = 1024
@@ -128,45 +134,122 @@ fun Routing.chatCompletionsRoute(engine: InferenceEngine, apiKey: String, metric
       call.response.headers.append("X-Farol-MaxTokens", "engine-cap")
     }
 
+    // ── Tools: determine if tool folding is active ────────────────────────────
+    // toolChoice="none" suppresses folding; anything else (including absent / "auto") enables it.
+    val toolChoiceNone = (request.toolChoice as? JsonPrimitive)?.contentOrNull == "none"
+    val activeTools = request.tools?.takeIf { it.isNotEmpty() && !toolChoiceNone }
+
+    // ── Compose systemInstruction ─────────────────────────────────────────────
+    // system messages from the conversation + optional tool prompt.
+    val systemInstruction: String? = buildString {
+      if (flat.systemText.isNotEmpty()) append(flat.systemText)
+      if (activeTools != null) {
+        if (isNotEmpty()) append("\n\n")
+        append(ToolPromptBuilder.build(activeTools))
+      }
+    }.takeIf { it.isNotEmpty() }
+
     // ── Stream or Batch ───────────────────────────────────────────────────────
     if (request.stream) {
-      call.respondSSE(engine, flat, maxTokens, temperature, request.thinking, responseId, created, modelName, metrics)
+      if (activeTools != null) {
+        // Tool-enabled stream: buffer the full generation, parse, then emit as SSE.
+        call.respondSSETooled(engine, flat, maxTokens, temperature, request.thinking, systemInstruction, responseId, created, modelName, metrics)
+      } else {
+        call.respondSSE(engine, flat, maxTokens, temperature, request.thinking, systemInstruction, responseId, created, modelName, metrics)
+      }
     } else {
-      val startMs = System.currentTimeMillis()
-      var engineError = false
-      try {
-        val result = engine.generate(flat.promptText, flat.images, maxTokens, temperature, request.thinking)
-        call.respond(
-          HttpStatusCode.OK,
-          ChatCompletionResponse(
-            id = responseId,
-            created = created,
-            model = modelName,
-            choices = listOf(
-              Choice(
-                message = AssistantMessage(
-                  content = result.text,
-                  reasoningContent = result.reasoningText,
-                ),
-                finishReason = "stop",
-              )
+      if (activeTools != null) {
+        // Tool-enabled batch: collect, parse, emit tool_calls or normal response.
+        val startMs = System.currentTimeMillis()
+        var engineError = false
+        try {
+          val result = engine.generate(flat.promptText, flat.images, maxTokens, temperature, request.thinking, systemInstruction)
+          val parsed = ToolCallParser.parse(result.text)
+          val (message, finishReason) = when (parsed) {
+            is ToolCallParser.ParseResult.ToolCalls -> {
+              val toolCallOuts = parsed.calls.mapIndexed { idx, tc ->
+                ToolCallOut(
+                  id = generateCallId(idx),
+                  function = FunctionCallOut(
+                    name = tc.name,
+                    arguments = tc.argumentsJson,
+                  ),
+                )
+              }
+              val contentText = parsed.prefixText.takeIf { it.isNotBlank() }
+              AssistantMessage(
+                content = contentText,
+                toolCalls = toolCallOuts,
+              ) to "tool_calls"
+            }
+            is ToolCallParser.ParseResult.NoToolCall -> {
+              AssistantMessage(
+                content = parsed.text,
+                reasoningContent = result.reasoningText,
+              ) to "stop"
+            }
+          }
+          call.respond(
+            HttpStatusCode.OK,
+            ChatCompletionResponse(
+              id = responseId,
+              created = created,
+              model = modelName,
+              choices = listOf(Choice(message = message, finishReason = finishReason)),
+              usage = Usage(
+                promptTokens = result.promptTokens,
+                completionTokens = result.completionTokens,
+                totalTokens = result.promptTokens + result.completionTokens,
+              ),
             ),
-            usage = Usage(
-              promptTokens = result.promptTokens,
-              completionTokens = result.completionTokens,
-              totalTokens = result.promptTokens + result.completionTokens,
+          )
+        } catch (e: Throwable) {
+          engineError = true
+          throw e
+        } finally {
+          metrics.record(
+            endpoint = FarolEndpoint.CHAT,
+            durationMs = System.currentTimeMillis() - startMs,
+            error = engineError,
+          )
+        }
+      } else {
+        val startMs = System.currentTimeMillis()
+        var engineError = false
+        try {
+          val result = engine.generate(flat.promptText, flat.images, maxTokens, temperature, request.thinking, systemInstruction)
+          call.respond(
+            HttpStatusCode.OK,
+            ChatCompletionResponse(
+              id = responseId,
+              created = created,
+              model = modelName,
+              choices = listOf(
+                Choice(
+                  message = AssistantMessage(
+                    content = result.text,
+                    reasoningContent = result.reasoningText,
+                  ),
+                  finishReason = "stop",
+                )
+              ),
+              usage = Usage(
+                promptTokens = result.promptTokens,
+                completionTokens = result.completionTokens,
+                totalTokens = result.promptTokens + result.completionTokens,
+              ),
             ),
-          ),
-        )
-      } catch (e: Throwable) {
-        engineError = true
-        throw e
-      } finally {
-        metrics.record(
-          endpoint = FarolEndpoint.CHAT,
-          durationMs = System.currentTimeMillis() - startMs,
-          error = engineError,
-        )
+          )
+        } catch (e: Throwable) {
+          engineError = true
+          throw e
+        } finally {
+          metrics.record(
+            endpoint = FarolEndpoint.CHAT,
+            durationMs = System.currentTimeMillis() - startMs,
+            error = engineError,
+          )
+        }
       }
     }
   }
@@ -178,6 +261,7 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
   maxTokens: Int,
   temperature: Float?,
   thinking: Boolean,
+  systemInstruction: String?,
   responseId: String,
   created: Long,
   modelName: String,
@@ -215,7 +299,7 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
     // finally marks it as an error, then re-thrown so the coroutine machinery
     // can clean up correctly.
     try {
-      engine.generateStream(flat.promptText, flat.images, maxTokens, temperature, thinking)
+      engine.generateStream(flat.promptText, flat.images, maxTokens, temperature, thinking, systemInstruction)
         .onEach { chunk: StreamChunk ->
           when {
             chunk.thought != null ->
@@ -262,4 +346,106 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
       )
     }
   }
+}
+
+/**
+ * SSE response for tool-enabled requests.
+ *
+ * Buffers the full generation, runs [ToolCallParser], then emits the result as SSE.
+ * Deliberate v1 design: tool requests do not stream incrementally (the client needs the full
+ * tool_call block to execute the tool anyway; incremental tokens are meaningless here).
+ *
+ * SSE shape when tool_calls detected:
+ *   1. role chunk (assistant)
+ *   2. tool_calls delta chunk
+ *   3. finish_reason="tool_calls" chunk
+ *   4. [DONE]
+ *
+ * SSE shape when plain answer:
+ *   1. role chunk
+ *   2. content chunks (split arbitrarily into segments)
+ *   3. finish_reason="stop" chunk
+ *   4. [DONE]
+ */
+private suspend fun io.ktor.server.application.ApplicationCall.respondSSETooled(
+  engine: InferenceEngine,
+  flat: PromptFlattener.FlatPrompt,
+  maxTokens: Int,
+  temperature: Float?,
+  thinking: Boolean,
+  systemInstruction: String?,
+  responseId: String,
+  created: Long,
+  modelName: String,
+  metrics: Metrics,
+) {
+  val startMs = System.currentTimeMillis()
+  response.headers.append("Cache-Control", "no-cache")
+  response.headers.append("Connection", "keep-alive")
+
+  // Collect full generation before opening the SSE writer.
+  var engineError = false
+  val result = try {
+    engine.generate(flat.promptText, flat.images, maxTokens, temperature, thinking, systemInstruction)
+  } catch (e: Throwable) {
+    engineError = true
+    metrics.record(endpoint = FarolEndpoint.CHAT, durationMs = System.currentTimeMillis() - startMs, error = true)
+    throw e
+  }
+
+  val parsed = ToolCallParser.parse(result.text)
+
+  respondTextWriter(
+    contentType = ContentType.parse("text/event-stream; charset=utf-8"),
+    status = HttpStatusCode.OK,
+  ) {
+    fun sendChunk(chunk: ChatCompletionChunk) {
+      val json = OpenAIJson.encodeToString(ChatCompletionChunk.serializer(), chunk)
+      write("data: $json\n\n")
+      flush()
+    }
+    fun makeChunk(delta: Delta, finishReason: String? = null) = ChatCompletionChunk(
+      id = responseId,
+      created = created,
+      model = modelName,
+      choices = listOf(ChunkChoice(delta = delta, finishReason = finishReason)),
+    )
+
+    // Role chunk.
+    sendChunk(makeChunk(Delta(role = "assistant")))
+
+    when (parsed) {
+      is ToolCallParser.ParseResult.ToolCalls -> {
+        val toolCallOuts = parsed.calls.mapIndexed { idx, tc ->
+          ToolCallOut(
+            id = generateCallId(idx),
+            function = FunctionCallOut(name = tc.name, arguments = tc.argumentsJson),
+          )
+        }
+        sendChunk(makeChunk(Delta(toolCalls = toolCallOuts)))
+        sendChunk(makeChunk(Delta(), finishReason = "tool_calls"))
+      }
+      is ToolCallParser.ParseResult.NoToolCall -> {
+        if (parsed.text.isNotEmpty()) {
+          sendChunk(makeChunk(Delta(content = parsed.text)))
+        }
+        sendChunk(makeChunk(Delta(content = null), finishReason = "stop"))
+      }
+    }
+
+    write("data: [DONE]\n\n")
+    flush()
+
+    metrics.record(
+      endpoint = FarolEndpoint.CHAT,
+      durationMs = System.currentTimeMillis() - startMs,
+      error = false,
+    )
+  }
+}
+
+/** Generates a stable tool call ID like "call_0a1b2c3d". */
+private fun generateCallId(index: Int): String {
+  val rand = UUID.randomUUID().toString().replace("-", "").take(8)
+  return "call_$rand"
 }

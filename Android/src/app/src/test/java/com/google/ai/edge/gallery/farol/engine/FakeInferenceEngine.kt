@@ -59,6 +59,8 @@ class FakeInferenceEngine(
     private set
   var lastThinking: Boolean? = null
     private set
+  var lastSystemInstruction: String? = null
+    private set
 
   var closeCalled = false
     private set
@@ -69,8 +71,9 @@ class FakeInferenceEngine(
     maxTokens: Int,
     temperature: Float?,
     thinking: Boolean,
+    systemInstruction: String?,
   ): Flow<StreamChunk> {
-    record(prompt, images, maxTokens, temperature, thinking)
+    record(prompt, images, maxTokens, temperature, thinking, systemInstruction)
     val error = throwOnGenerate
     return if (error != null) {
       flow {
@@ -97,8 +100,9 @@ class FakeInferenceEngine(
     maxTokens: Int,
     temperature: Float?,
     thinking: Boolean,
+    systemInstruction: String?,
   ): GenerationResult {
-    record(prompt, images, maxTokens, temperature, thinking)
+    record(prompt, images, maxTokens, temperature, thinking, systemInstruction)
     throwOnGenerate?.let { throw it }
     val text = chunks.joinToString("")
     val reasoningText = if (thinking && thoughtChunks.isNotEmpty()) {
@@ -116,11 +120,12 @@ class FakeInferenceEngine(
     closeCalled = true
   }
 
-  private fun record(prompt: String, images: List<ByteArray>, maxTokens: Int, temperature: Float?, thinking: Boolean) {
+  private fun record(prompt: String, images: List<ByteArray>, maxTokens: Int, temperature: Float?, thinking: Boolean, systemInstruction: String?) {
     lastPrompt = prompt
     lastImages = images
     lastMaxTokens = maxTokens
     lastTemperature = temperature
     lastThinking = thinking
+    lastSystemInstruction = systemInstruction
   }
 }

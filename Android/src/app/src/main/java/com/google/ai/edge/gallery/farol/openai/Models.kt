@@ -20,6 +20,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 
 // ── Shared codec instances ────────────────────────────────────────────────────
 // Use these everywhere so codec configuration cannot drift between routes.
@@ -50,12 +51,67 @@ data class ChatCompletionRequest(
    * behave identically to before this field existed.
    */
   val thinking: Boolean = false,
+  /**
+   * OpenAI tool definitions.  When non-empty and [toolChoice] is not "none", the tool descriptions
+   * are folded into the system instruction as text and the model is instructed to emit a delimited
+   * JSON block for calls.
+   */
+  val tools: List<ToolDef>? = null,
+  /**
+   * Controls tool selection.  May be the string "auto", "none", "required", or a
+   * `{"type":"function","function":{"name":"..."}}` object.  Kept as [JsonElement] so unknown
+   * shapes are tolerated without 400s.  Only "none" suppresses tool folding; everything else
+   * enables it when [tools] is non-empty.
+   */
+  @SerialName("tool_choice") val toolChoice: JsonElement? = null,
+)
+
+// ── Tool definitions (request) ────────────────────────────────────────────────
+
+@Serializable
+data class ToolDef(
+  val type: String = "function",
+  val function: FunctionDef,
+)
+
+@Serializable
+data class FunctionDef(
+  val name: String,
+  val description: String? = null,
+  val parameters: JsonObject? = null,
+)
+
+// ── Tool call output (response / delta) ───────────────────────────────────────
+
+@Serializable
+data class ToolCallOut(
+  val id: String,
+  val type: String = "function",
+  val function: FunctionCallOut,
+)
+
+@Serializable
+data class FunctionCallOut(
+  val name: String,
+  /** Arguments as a compact JSON STRING (per OpenAI spec), e.g. "{\"city\":\"Perth\"}". */
+  val arguments: String,
 )
 
 @Serializable
 data class ChatMessage(
   val role: String,
   val content: JsonElement,  // string OR array of parts
+  /**
+   * Passthrough: tool_call_id present on role="tool" messages.  The flattener renders these as
+   * "[tool <id> result]: <content>".  Null for all other message roles.
+   */
+  @SerialName("tool_call_id") val toolCallId: String? = null,
+  /**
+   * Passthrough: tool_calls present on role="assistant" messages that contain a prior tool call.
+   * Kept as [JsonElement] to avoid coupling to [ToolCallOut] in the message layer — the flattener
+   * renders them as text without needing a fully-typed decode.  Null when not present.
+   */
+  @SerialName("tool_calls") val toolCalls: JsonElement? = null,
 )
 
 // ── Response ─────────────────────────────────────────────────────────────────
@@ -80,14 +136,22 @@ data class Choice(
 @Serializable
 data class AssistantMessage(
   val role: String = "assistant",
-  val content: String,
+  /**
+   * Assistant text content.  Null when this message carries [toolCalls] only (per OpenAI spec).
+   * When both [content] and [toolCalls] are present, [content] holds any prefix prose the model
+   * emitted before the tool_call block.
+   */
+  val content: String? = null,
   /**
    * Accumulated reasoning/thinking text, following the DeepSeek convention.
    * Null when thinking was not requested or produced no output.
-   * Harnesses that consume DeepSeek-style responses (e.g. open-webui) already understand this
-   * field without any changes on their side.
    */
   @SerialName("reasoning_content") val reasoningContent: String? = null,
+  /**
+   * Tool calls emitted by the model.  Non-null only when the model produced a
+   * tool_call block in its response (finish_reason = "tool_calls").
+   */
+  @SerialName("tool_calls") val toolCalls: List<ToolCallOut>? = null,
 )
 
 @Serializable
@@ -124,6 +188,11 @@ data class Delta(
    * Null on all non-thinking chunks and when thinking=false was requested.
    */
   @SerialName("reasoning_content") val reasoningContent: String? = null,
+  /**
+   * Tool calls delta.  When non-null, the entire tool_calls list is present in a single delta
+   * chunk (FAROL v1 buffers tool results, so there are no partial tool_call deltas).
+   */
+  @SerialName("tool_calls") val toolCalls: List<ToolCallOut>? = null,
 )
 
 // ── Models list ───────────────────────────────────────────────────────────────

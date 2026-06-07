@@ -56,13 +56,75 @@ class PromptFlattenerTest {
   }
 
   @Test
-  fun `system and user messages joined with double newline`() {
+  fun `system message is extracted to systemText not promptText`() {
     val messages = listOf(
       ChatMessage(role = "system", content = JsonPrimitive("You are helpful.")),
       ChatMessage(role = "user", content = JsonPrimitive("Tell me a joke.")),
     )
     val result = PromptFlattener.flatten(messages)
-    assertEquals("You are helpful.\n\nTell me a joke.", result.promptText)
+    // System messages go to systemText; only user/assistant messages go to promptText.
+    assertEquals("You are helpful.", result.systemText)
+    assertEquals("Tell me a joke.", result.promptText)
+  }
+
+  @Test
+  fun `multiple system messages joined in systemText`() {
+    val messages = listOf(
+      ChatMessage(role = "system", content = JsonPrimitive("Instruction 1.")),
+      ChatMessage(role = "system", content = JsonPrimitive("Instruction 2.")),
+      ChatMessage(role = "user", content = JsonPrimitive("Hi")),
+    )
+    val result = PromptFlattener.flatten(messages)
+    assertEquals("Instruction 1.\n\nInstruction 2.", result.systemText)
+    assertEquals("Hi", result.promptText)
+  }
+
+  @Test
+  fun `no system messages means empty systemText`() {
+    val messages = listOf(
+      ChatMessage(role = "user", content = JsonPrimitive("Hello")),
+    )
+    val result = PromptFlattener.flatten(messages)
+    assertEquals("", result.systemText)
+    assertEquals("Hello", result.promptText)
+  }
+
+  @Test
+  fun `assistant with tool_calls rendered as bracket text`() {
+    val toolCallsJson = buildJsonArray {
+      add(buildJsonObject {
+        put("id", "call_abc")
+        put("type", "function")
+        put("function", buildJsonObject {
+          put("name", "get_weather")
+          put("arguments", "{\"city\": \"Perth\"}")
+        })
+      })
+    }
+    val messages = listOf(
+      ChatMessage(role = "assistant", content = JsonPrimitive(""), toolCalls = toolCallsJson),
+    )
+    val result = PromptFlattener.flatten(messages)
+    assertTrue(result.promptText.contains("[assistant called tool get_weather"), "prompt: ${result.promptText}")
+    assertTrue(result.promptText.contains("Perth"), "prompt: ${result.promptText}")
+  }
+
+  @Test
+  fun `tool result message rendered as bracket format`() {
+    val messages = listOf(
+      ChatMessage(role = "tool", content = JsonPrimitive("42"), toolCallId = "call_xyz"),
+    )
+    val result = PromptFlattener.flatten(messages)
+    assertEquals("[tool call_xyz result]: 42", result.promptText)
+  }
+
+  @Test
+  fun `tool result with null toolCallId uses unknown placeholder`() {
+    val messages = listOf(
+      ChatMessage(role = "tool", content = JsonPrimitive("result"), toolCallId = null),
+    )
+    val result = PromptFlattener.flatten(messages)
+    assertEquals("[tool unknown result]: result", result.promptText)
   }
 
   @Test

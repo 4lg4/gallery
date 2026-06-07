@@ -76,6 +76,10 @@ interface InferenceEngine : java.io.Closeable {
    * @param thinking When true, enables Gemma 4 thinking mode; [GenerationResult.reasoningText] will
    *   be populated with the accumulated "thought" channel output.  When false (default),
    *   [GenerationResult.reasoningText] is null and behaviour is identical to prior versions.
+   * @param systemInstruction Optional system instruction text.  When non-null, passed as
+   *   [ConversationConfig.systemInstruction] to the underlying LiteRT-LM engine.  System-role
+   *   messages and tool prompts are folded here by the route; the prompt text contains only the
+   *   conversation turns.
    * @return [GenerationResult] with the generated text and token counts.
    */
   suspend fun generate(
@@ -84,6 +88,7 @@ interface InferenceEngine : java.io.Closeable {
     maxTokens: Int,
     temperature: Float?,
     thinking: Boolean = false,
+    systemInstruction: String? = null,
   ): GenerationResult
 
   /**
@@ -104,6 +109,8 @@ interface InferenceEngine : java.io.Closeable {
    * @param thinking When true, enables Gemma 4 thinking mode; [StreamChunk.thought] chunks will be
    *   interleaved with [StreamChunk.content] chunks.  When false (default), all chunks carry only
    *   [StreamChunk.content] and behaviour is identical to prior versions.
+   * @param systemInstruction Optional system instruction text.  When non-null, passed as
+   *   [ConversationConfig.systemInstruction] to the underlying LiteRT-LM engine.
    * @return [Flow] of [StreamChunk]s.
    */
   fun generateStream(
@@ -112,6 +119,7 @@ interface InferenceEngine : java.io.Closeable {
     maxTokens: Int,
     temperature: Float?,
     thinking: Boolean = false,
+    systemInstruction: String? = null,
   ): Flow<StreamChunk>
 
   /**

@@ -152,6 +152,7 @@ class LiteRtLmEngine(
     maxTokens: Int,
     temperature: Float?,
     thinking: Boolean,
+    systemInstruction: String?,
   ): Flow<StreamChunk> {
     // Validate before returning the flow so IllegalArgumentException is thrown at call site,
     // not deferred to collection time — and without touching the mutex.
@@ -172,7 +173,7 @@ class LiteRtLmEngine(
 
       // Path A: createConversation itself may throw (e.g. native OOM, bad model state).
       val conversation = try {
-        createConversation(temperature)
+        createConversation(temperature, systemInstruction)
       } catch (e: Exception) {
         Log.e(TAG, "generateStream: createConversation failed", e)
         releaseMutex() // Path A unlock
@@ -255,8 +256,9 @@ class LiteRtLmEngine(
     maxTokens: Int,
     temperature: Float?,
     thinking: Boolean,
+    systemInstruction: String?,
   ): GenerationResult {
-    val chunks = generateStream(prompt, images, maxTokens, temperature, thinking).toList()
+    val chunks = generateStream(prompt, images, maxTokens, temperature, thinking, systemInstruction).toList()
     val text = chunks.mapNotNull { it.content }.joinToString("")
     val reasoningText = chunks.mapNotNull { it.thought }.joinToString("").takeIf { it.isNotEmpty() }
     // ESTIMATED: LiteRT-LM 0.11.0 does not expose token counts in Message or Engine.
@@ -299,8 +301,12 @@ class LiteRtLmEngine(
    *
    * [SamplerConfig] is always applied (FAROL v1 uses GPU backend, never NPU/TPU).
    * Temperature uses the [temperature] argument when provided; falls back to 1.0f (model default).
+   *
+   * When [systemInstruction] is non-null, it is passed as [ConversationConfig.systemInstruction]
+   * (mirroring [LlmChatModelHelper]'s construction) so the model receives a persistent system
+   * context separate from the conversation turns.
    */
-  private fun createConversation(temperature: Float?) =
+  private fun createConversation(temperature: Float?, systemInstruction: String? = null) =
     engine.createConversation(
       ConversationConfig(
         samplerConfig = SamplerConfig(
@@ -308,6 +314,7 @@ class LiteRtLmEngine(
           topP = 0.95,
           temperature = (temperature ?: 1.0f).toDouble(),
         ),
+        systemInstruction = systemInstruction?.let { Contents.of(it) },
       )
     )
 
