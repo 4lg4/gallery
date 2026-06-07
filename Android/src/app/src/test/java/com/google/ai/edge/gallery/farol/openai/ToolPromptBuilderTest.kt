@@ -67,9 +67,12 @@ class ToolPromptBuilderTest {
   }
 
   @Test
-  fun `output contains nothing after instruction`() {
+  fun `output ends with normal-answer fallback instruction`() {
     val result = ToolPromptBuilder.build(listOf(makeTool("fn")))
     assertTrue(result.contains("answer normally"), "Normal-answer instruction not found: $result")
+    // The fallback instruction must appear at or near the end of the prompt (within the last 200 chars).
+    val idx = result.lastIndexOf("answer normally")
+    assertTrue(idx >= result.length - 200, "Normal-answer instruction is not near the end of the prompt: $result")
   }
 
   @Test

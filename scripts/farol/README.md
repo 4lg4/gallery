@@ -24,6 +24,9 @@ exempting the app from Doze so the server survives reboots and background kills.
   Responses include the header `X-Farol-MaxTokens: engine-cap` when `max_tokens` was provided.
 - `GET /metrics` (auth required): returns uptime, request/error counts per endpoint, last-request
   duration, and the loaded model name.
+- `system` messages: extracted from the conversation and passed as `ConversationConfig.systemInstruction`
+  (not inlined into the prompt text). When `tools` are provided, the tool-call prompt is appended to
+  the same `systemInstruction`, separated by a blank line.
 
 ## Design doc
 

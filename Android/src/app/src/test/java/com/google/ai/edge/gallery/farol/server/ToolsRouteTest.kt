@@ -353,6 +353,130 @@ class ToolsRouteTest {
     assertNotNull(stopChunk, "No finish_reason=stop chunk found. events=$events")
   }
 
+  // ── MULTI-CALL: batch with multiple tool_call blocks ─────────────────────
+
+  private val twoToolCallResponse = """
+    ```tool_call
+    {"name": "get_weather", "arguments": {"city": "Perth"}}
+    ```
+    ```tool_call
+    {"name": "get_forecast", "arguments": {"city": "Perth", "days": 3}}
+    ```
+  """.trimIndent()
+
+  private val twoToolsJson = """
+    [
+      {"type":"function","function":{"name":"get_weather","description":"Get current weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}},
+      {"type":"function","function":{"name":"get_forecast","description":"Get forecast","parameters":{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}}}}}
+    ]
+  """.trimIndent()
+
+  @Test
+  fun `batch response with multiple tool_call blocks yields 2 tool_calls with unique ids`() = testApplication {
+    val fake = FakeInferenceEngine(chunks = listOf(twoToolCallResponse))
+    application { farolModule(fake, TOOLS_KEY) }
+    val resp = client.post("/v1/chat/completions") {
+      header("Authorization", "Bearer $TOOLS_KEY")
+      contentType(ContentType.Application.Json)
+      setBody("""{"messages":[{"role":"user","content":"weather and forecast?"}],"tools":$twoToolsJson}""")
+    }
+    assertEquals(HttpStatusCode.OK, resp.status)
+    val body = OpenAIDecoder.decodeFromString<ChatCompletionResponse>(resp.bodyAsText())
+    val toolCalls = body.choices[0].message.toolCalls
+    assertNotNull(toolCalls, "tool_calls must be present")
+    assertEquals(2, toolCalls.size, "Expected 2 tool_calls, got ${toolCalls.size}")
+    assertEquals("get_weather", toolCalls[0].function.name)
+    assertEquals("get_forecast", toolCalls[1].function.name)
+    // IDs must be unique
+    val ids = toolCalls.map { it.id }
+    assertEquals(2, ids.toSet().size, "tool_call ids must be unique: $ids")
+    // Each id must be a valid JSON string (no nulls) parseable as a string
+    ids.forEach { id ->
+      assertTrue(id.startsWith("call_"), "id must start with call_: $id")
+    }
+    // arguments must be valid JSON strings
+    toolCalls.forEach { tc ->
+      val parsed = kotlinx.serialization.json.Json.parseToJsonElement(tc.function.arguments)
+      assertNotNull(parsed)
+    }
+  }
+
+  @Test
+  fun `batch multiple tool_calls have valid arguments strings`() = testApplication {
+    val fake = FakeInferenceEngine(chunks = listOf(twoToolCallResponse))
+    application { farolModule(fake, TOOLS_KEY) }
+    val resp = client.post("/v1/chat/completions") {
+      header("Authorization", "Bearer $TOOLS_KEY")
+      contentType(ContentType.Application.Json)
+      setBody("""{"messages":[{"role":"user","content":"weather and forecast?"}],"tools":$twoToolsJson}""")
+    }
+    val body = OpenAIDecoder.decodeFromString<ChatCompletionResponse>(resp.bodyAsText())
+    val toolCalls = body.choices[0].message.toolCalls!!
+    // First call: city=Perth
+    val args0 = kotlinx.serialization.json.Json.parseToJsonElement(toolCalls[0].function.arguments).jsonObject
+    assertNotNull(args0["city"])
+    // Second call: city=Perth, days=3
+    val args1 = kotlinx.serialization.json.Json.parseToJsonElement(toolCalls[1].function.arguments).jsonObject
+    assertNotNull(args1["city"])
+    assertNotNull(args1["days"])
+  }
+
+  // ── MULTI-CALL: streaming with multiple tool calls has index 0 and 1 ─────
+
+  @Test
+  fun `streaming with multiple tool calls delta has index 0 and 1`() = testApplication {
+    val fake = FakeInferenceEngine(chunks = listOf(twoToolCallResponse))
+    application { farolModule(fake, TOOLS_KEY) }
+    val resp = client.post("/v1/chat/completions") {
+      header("Authorization", "Bearer $TOOLS_KEY")
+      contentType(ContentType.Application.Json)
+      setBody("""{"stream":true,"messages":[{"role":"user","content":"weather and forecast?"}],"tools":$twoToolsJson}""")
+    }
+    val raw = resp.bodyAsText()
+    val events = parseSSELines(raw)
+    // Find the delta chunk that carries tool_calls
+    val toolCallChunk = events.mapNotNull {
+      val chunk = OpenAIDecoder.decodeFromString<ChatCompletionChunk>(it)
+      chunk.takeIf { c -> c.choices[0].delta.toolCalls != null }
+    }.firstOrNull()
+    assertNotNull(toolCallChunk, "No tool_calls delta in SSE. events=$events")
+    val toolCalls = toolCallChunk.choices[0].delta.toolCalls!!
+    assertEquals(2, toolCalls.size, "Expected 2 tool_calls in streaming delta")
+    // index values must be 0 and 1
+    assertEquals(0, toolCalls[0].index, "First streaming tool_call index must be 0")
+    assertEquals(1, toolCalls[1].index, "Second streaming tool_call index must be 1")
+    // Decoded correctly via OpenAIDecoder
+    assertEquals("get_weather", toolCalls[0].function.name)
+    assertEquals("get_forecast", toolCalls[1].function.name)
+  }
+
+  // ── MULTI-CALL: batch prefixText + tool_call block → content + tool_calls ─
+
+  @Test
+  fun `batch prefixText case yields both content and tool_calls`() = testApplication {
+    val prefixAndToolCall = "Let me check the weather.\n```tool_call\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Perth\"}}\n```"
+    val fake = FakeInferenceEngine(chunks = listOf(prefixAndToolCall))
+    application { farolModule(fake, TOOLS_KEY) }
+    val resp = client.post("/v1/chat/completions") {
+      header("Authorization", "Bearer $TOOLS_KEY")
+      contentType(ContentType.Application.Json)
+      setBody("""{"messages":[{"role":"user","content":"What is the weather?"}],"tools":$toolsJson}""")
+    }
+    assertEquals(HttpStatusCode.OK, resp.status)
+    val body = OpenAIDecoder.decodeFromString<ChatCompletionResponse>(resp.bodyAsText())
+    val message = body.choices[0].message
+    // content must hold the prefix prose
+    assertNotNull(message.content, "content must be non-null for prefix prose")
+    assertTrue(
+      message.content!!.contains("Let me check the weather."),
+      "content must contain prefix prose: ${message.content}"
+    )
+    // tool_calls must also be present
+    assertNotNull(message.toolCalls, "tool_calls must be present alongside prefix prose")
+    assertEquals(1, message.toolCalls!!.size)
+    assertEquals("get_weather", message.toolCalls[0].function.name)
+  }
+
   // ── Existing no-tools path unaffected ─────────────────────────────────────
 
   @Test

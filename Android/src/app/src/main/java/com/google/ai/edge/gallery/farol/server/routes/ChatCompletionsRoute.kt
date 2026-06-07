@@ -395,57 +395,70 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSETooled(
 
   val parsed = ToolCallParser.parse(result.text)
 
-  respondTextWriter(
-    contentType = ContentType.parse("text/event-stream; charset=utf-8"),
-    status = HttpStatusCode.OK,
-  ) {
-    fun sendChunk(chunk: ChatCompletionChunk) {
-      val json = OpenAIJson.encodeToString(ChatCompletionChunk.serializer(), chunk)
-      write("data: $json\n\n")
+  try {
+    respondTextWriter(
+      contentType = ContentType.parse("text/event-stream; charset=utf-8"),
+      status = HttpStatusCode.OK,
+    ) {
+      fun sendChunk(chunk: ChatCompletionChunk) {
+        val json = OpenAIJson.encodeToString(ChatCompletionChunk.serializer(), chunk)
+        write("data: $json\n\n")
+        flush()
+      }
+      fun makeChunk(delta: Delta, finishReason: String? = null) = ChatCompletionChunk(
+        id = responseId,
+        created = created,
+        model = modelName,
+        choices = listOf(ChunkChoice(delta = delta, finishReason = finishReason)),
+      )
+
+      // Role chunk.
+      sendChunk(makeChunk(Delta(role = "assistant")))
+
+      when (parsed) {
+        is ToolCallParser.ParseResult.ToolCalls -> {
+          // index is set on streaming deltas so openai-python accumulator can key on it.
+          val toolCallOuts = parsed.calls.mapIndexed { idx, tc ->
+            ToolCallOut(
+              id = generateCallId(idx),
+              index = idx,
+              function = FunctionCallOut(name = tc.name, arguments = tc.argumentsJson),
+            )
+          }
+          sendChunk(makeChunk(Delta(toolCalls = toolCallOuts)))
+          sendChunk(makeChunk(Delta(), finishReason = "tool_calls"))
+        }
+        is ToolCallParser.ParseResult.NoToolCall -> {
+          if (parsed.text.isNotEmpty()) {
+            sendChunk(makeChunk(Delta(content = parsed.text)))
+          }
+          sendChunk(makeChunk(Delta(content = null), finishReason = "stop"))
+        }
+      }
+
+      write("data: [DONE]\n\n")
       flush()
     }
-    fun makeChunk(delta: Delta, finishReason: String? = null) = ChatCompletionChunk(
-      id = responseId,
-      created = created,
-      model = modelName,
-      choices = listOf(ChunkChoice(delta = delta, finishReason = finishReason)),
-    )
-
-    // Role chunk.
-    sendChunk(makeChunk(Delta(role = "assistant")))
-
-    when (parsed) {
-      is ToolCallParser.ParseResult.ToolCalls -> {
-        val toolCallOuts = parsed.calls.mapIndexed { idx, tc ->
-          ToolCallOut(
-            id = generateCallId(idx),
-            function = FunctionCallOut(name = tc.name, arguments = tc.argumentsJson),
-          )
-        }
-        sendChunk(makeChunk(Delta(toolCalls = toolCallOuts)))
-        sendChunk(makeChunk(Delta(), finishReason = "tool_calls"))
-      }
-      is ToolCallParser.ParseResult.NoToolCall -> {
-        if (parsed.text.isNotEmpty()) {
-          sendChunk(makeChunk(Delta(content = parsed.text)))
-        }
-        sendChunk(makeChunk(Delta(content = null), finishReason = "stop"))
-      }
-    }
-
-    write("data: [DONE]\n\n")
-    flush()
-
+  } catch (e: kotlinx.coroutines.CancellationException) {
+    engineError = true
+    throw e
+  } finally {
     metrics.record(
       endpoint = FarolEndpoint.CHAT,
       durationMs = System.currentTimeMillis() - startMs,
-      error = false,
+      error = engineError,
     )
   }
 }
 
-/** Generates a stable tool call ID like "call_0a1b2c3d". */
+/**
+ * Generates a unique, determinism-friendly tool call ID.
+ *
+ * Format: `call_<8 hex chars><index>` — the UUID-derived hex prefix ensures uniqueness across
+ * multiple independent invocations; the decimal index suffix disambiguates sibling calls within
+ * the *same* response (e.g. "call_0a1b2c3d0", "call_0a1b2c3d1").
+ */
 private fun generateCallId(index: Int): String {
   val rand = UUID.randomUUID().toString().replace("-", "").take(8)
-  return "call_$rand"
+  return "call_$rand$index"
 }

@@ -88,6 +88,12 @@ data class ToolCallOut(
   val id: String,
   val type: String = "function",
   val function: FunctionCallOut,
+  /**
+   * 0-based index within the tool_calls array.  Required in streaming delta responses so that
+   * openai-python's stream accumulator can correctly key and merge partial tool_call fragments.
+   * Null in batch responses (OpenAI batch format carries no index field).
+   */
+  val index: Int? = null,
 )
 
 @Serializable
