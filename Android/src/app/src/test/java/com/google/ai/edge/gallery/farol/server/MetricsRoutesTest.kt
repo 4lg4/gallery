@@ -19,6 +19,7 @@ package com.google.ai.edge.gallery.farol.server
 import com.google.ai.edge.gallery.farol.engine.FakeInferenceEngine
 import com.google.ai.edge.gallery.farol.openai.ErrorResponse
 import com.google.ai.edge.gallery.farol.openai.OpenAIDecoder
+import com.google.ai.edge.gallery.farol.openai.OpenAIJson
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -39,9 +40,15 @@ private const val API_KEY = "test-api-key"
  *
  * Metrics wiring choice: [farolModule] accepts an optional [Metrics] instance; route tests pass
  * an explicit instance so they can assert state after making requests.  The inference-call sites
- * in [chatCompletionsRoute], [captionRoute] and [vqaRoute] record via try/finally (batch path)
- * or via [kotlinx.coroutines.flow.catch] (stream path), ensuring a single record() call per
- * request with no double-counting.
+ * in [chatCompletionsRoute], [captionRoute] and [vqaRoute] record via try/finally, ensuring a
+ * single record() call per request regardless of success, engine error, or client disconnect.
+ *
+ * NOTE — cancellation/disconnect path: triggering a real CancellationException inside
+ * testApplication is not feasible.  testApplication drives the full coroutine pipeline
+ * synchronously; there is no mechanism to cancel the server-side coroutine mid-collect() from the
+ * test client side (closing the client connection in a testApplication does not propagate
+ * cancellation into the respondTextWriter lambda in the same way a real Netty/CIO disconnect
+ * does).  The try/finally correctness is verified by code-review of the production path instead.
  */
 class MetricsRoutesTest {
 
@@ -94,14 +101,13 @@ class MetricsRoutesTest {
 
     val resp = client.get("/metrics") { header("Authorization", "Bearer $API_KEY") }
     assertEquals(HttpStatusCode.OK, resp.status)
-    val body = resp.bodyAsText()
-    // totalRequests = 1, totalErrors = 0
-    assertTrue(body.contains("\"totalRequests\":1"), "body=$body")
-    assertTrue(body.contains("\"totalErrors\":0"), "body=$body")
-    assertTrue(body.contains("\"chat\":1"), "body=$body")
-    assertTrue(body.contains("\"caption\":0"), "body=$body")
-    assertTrue(body.contains("\"vqa\":0"), "body=$body")
-    assertTrue(body.contains("\"model\":\"test-model\""), "body=$body")
+    val snapshot = OpenAIJson.decodeFromString(MetricsSnapshot.serializer(), resp.bodyAsText())
+    assertEquals(1L, snapshot.totalRequests)
+    assertEquals(0L, snapshot.totalErrors)
+    assertEquals(1L, snapshot.perEndpoint["chat"])
+    assertEquals(0L, snapshot.perEndpoint["caption"])
+    assertEquals(0L, snapshot.perEndpoint["vqa"])
+    assertEquals("test-model", snapshot.model)
   }
 
   @Test
@@ -118,20 +124,16 @@ class MetricsRoutesTest {
     }
 
     val resp = client.get("/metrics") { header("Authorization", "Bearer $API_KEY") }
-    val body = resp.bodyAsText()
-    assertTrue(body.contains("\"totalRequests\":1"), "body=$body")
-    assertTrue(body.contains("\"totalErrors\":1"), "body=$body")
+    val snapshot = OpenAIJson.decodeFromString(MetricsSnapshot.serializer(), resp.bodyAsText())
+    assertEquals(1L, snapshot.totalRequests)
+    assertEquals(1L, snapshot.totalErrors)
   }
 
   @Test
   fun `metrics snapshot uptime is non-negative`() = testApplication {
     application { farolModule(FakeInferenceEngine(), API_KEY) }
     val resp = client.get("/metrics") { header("Authorization", "Bearer $API_KEY") }
-    val body = resp.bodyAsText()
-    // uptimeMs is some non-negative integer in the JSON
-    val match = Regex(""""uptimeMs":(\d+)""").find(body)
-    assertTrue(match != null, "uptimeMs not found in: $body")
-    val uptime = match!!.groupValues[1].toLong()
-    assertTrue(uptime >= 0L, "uptimeMs=$uptime")
+    val snapshot = OpenAIJson.decodeFromString(MetricsSnapshot.serializer(), resp.bodyAsText())
+    assertTrue(snapshot.uptimeMs >= 0L, "uptimeMs=${snapshot.uptimeMs}")
   }
 }

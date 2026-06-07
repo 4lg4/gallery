@@ -204,36 +204,48 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
 
     var streamError: Throwable? = null
 
-    engine.generateStream(flat.promptText, flat.images, maxTokens, temperature)
-      .onEach { text -> sendChunk(makeChunk(Delta(content = text))) }
-      .catch { e ->
-        streamError = e
+    // try/finally ensures metrics.record() runs even when the coroutine is
+    // cancelled by a client disconnect.  CancellationException is caught by
+    // the .catch operator below, stored as streamError so the record() in
+    // finally marks it as an error, then re-thrown so the coroutine machinery
+    // can clean up correctly.
+    try {
+      engine.generateStream(flat.promptText, flat.images, maxTokens, temperature)
+        .onEach { text -> sendChunk(makeChunk(Delta(content = text))) }
+        .catch { e ->
+          streamError = e
+        }
+        .collect()
+
+      if (streamError != null) {
+        // Mid-stream engine error: emit error event then stop (header already committed)
+        val errJson = buildJsonObject {
+          put("error", buildJsonObject {
+            put("message", streamError!!.message ?: "unknown error")
+            put("type", "server_error")
+          })
+        }.toString()
+        write("data: $errJson\n\n")
+        flush()
+      } else {
+        // Normal completion: final chunk with finish_reason=stop
+        sendChunk(makeChunk(Delta(content = null), finishReason = "stop"))
       }
-      .collect()
 
-    metrics.record(
-      endpoint = FarolEndpoint.CHAT,
-      durationMs = System.currentTimeMillis() - startMs,
-      error = streamError != null,
-    )
-
-    if (streamError != null) {
-      // Mid-stream error: emit error event then stop (header already committed)
-      val errJson = buildJsonObject {
-        put("error", buildJsonObject {
-          put("message", streamError!!.message ?: "unknown error")
-          put("type", "server_error")
-        })
-      }.toString()
-      write("data: $errJson\n\n")
+      // Always terminate with [DONE]
+      write("data: [DONE]\n\n")
       flush()
-    } else {
-      // Normal completion: final chunk with finish_reason=stop
-      sendChunk(makeChunk(Delta(content = null), finishReason = "stop"))
+    } catch (e: kotlinx.coroutines.CancellationException) {
+      // Client disconnected mid-stream; mark as error for metrics then re-throw
+      // so the coroutine structured-concurrency machinery can propagate cancellation.
+      streamError = e
+      throw e
+    } finally {
+      metrics.record(
+        endpoint = FarolEndpoint.CHAT,
+        durationMs = System.currentTimeMillis() - startMs,
+        error = streamError != null,
+      )
     }
-
-    // Always terminate with [DONE]
-    write("data: [DONE]\n\n")
-    flush()
   }
 }
