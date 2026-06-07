@@ -16,7 +16,6 @@
 
 package com.google.ai.edge.gallery.farol.engine
 
-import android.graphics.BitmapFactory
 import android.util.Log
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
@@ -27,13 +26,12 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
-import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 private const val TAG = "LiteRtLmEngine"
 
@@ -106,8 +104,19 @@ class LiteRtLmEngine(
   /**
    * Returns a [Flow] that emits text chunks as they arrive from [MessageCallback.onMessage].
    *
-   * The single-flight [mutex] is acquired before the flow starts and released when the flow
-   * terminates (normally, with error, or via cancellation).
+   * ## Mutex unlock contract
+   * The [mutex] is acquired once, before [createConversation], and released exactly once via the
+   * [releasedOnce] guard — on whichever of the three exit paths fires first:
+   *
+   *   A) [createConversation] throws  → caught by the outer try/catch; mutex released there;
+   *      flow closed with the error; `return@callbackFlow` skips [awaitClose].
+   *   B) [sendMessageAsync] setup throws → caught by the inner try/catch; mutex released there
+   *      after closing the conversation; flow closed with the error; `return@callbackFlow` skips
+   *      [awaitClose].
+   *   C) Normal completion, [onError], or flow cancellation → [awaitClose] releases the mutex.
+   *
+   * [releasedOnce] makes the release idempotent: whichever path runs first wins; subsequent calls
+   * are no-ops, so double-unlock (which would throw [IllegalStateException]) is impossible.
    */
   override fun generateStream(
     prompt: String,
@@ -119,7 +128,23 @@ class LiteRtLmEngine(
     mutex.lock()
     Log.d(TAG, "generateStream: acquired mutex, prompt=${prompt.take(80)}...")
 
-    val conversation = createConversation(temperature)
+    // Guard: exactly one path may call mutex.unlock().
+    val releasedOnce = AtomicBoolean(false)
+    fun releaseMutex() {
+      if (releasedOnce.compareAndSet(false, true)) mutex.unlock()
+    }
+
+    // Path A: createConversation itself may throw (e.g. native OOM, bad model state).
+    val conversation = try {
+      createConversation(temperature)
+    } catch (e: Exception) {
+      Log.e(TAG, "generateStream: createConversation failed", e)
+      releaseMutex() // Path A unlock
+      close(e)
+      return@callbackFlow
+    }
+
+    // Path B: sendMessageAsync setup failure (e.g. buildContents, engine API error).
     try {
       val contents = buildContents(prompt, images)
       conversation.sendMessageAsync(
@@ -135,36 +160,30 @@ class LiteRtLmEngine(
 
           override fun onDone() {
             Log.d(TAG, "generateStream: onDone")
-            close() // closes the callbackFlow normally
+            close() // closes the callbackFlow normally; awaitClose will run → Path C
           }
 
           override fun onError(throwable: Throwable) {
             Log.e(TAG, "generateStream: onError", throwable)
-            close(throwable)
+            close(throwable) // awaitClose will run → Path C
           }
         },
         emptyMap(),
       )
     } catch (e: Exception) {
-      // Failed to start sendMessageAsync — close with the error.
       Log.e(TAG, "generateStream: sendMessageAsync setup failed", e)
-      conversation.close()
-      mutex.unlock()
+      try { conversation.close() } catch (_: Exception) {}
+      releaseMutex() // Path B unlock
       close(e)
       return@callbackFlow
     }
 
+    // Path C: normal completion, onError, or cancellation — awaitClose is always called here.
     awaitClose {
-      // Called on flow cancellation OR after close()/close(throwable) above.
-      // Mirror helper's stopResponse: cancelProcess() stops ongoing generation.
       Log.d(TAG, "generateStream: awaitClose — cancelling conversation")
-      try {
-        conversation.cancelProcess()
-      } catch (_: Exception) {}
-      try {
-        conversation.close()
-      } catch (_: Exception) {}
-      mutex.unlock()
+      try { conversation.cancelProcess() } catch (_: Exception) {}
+      try { conversation.close() } catch (_: Exception) {}
+      releaseMutex() // Path C unlock
     }
   }
 
@@ -230,29 +249,17 @@ class LiteRtLmEngine(
    * Builds a [Contents] from images + text.
    *
    * Mirror helper comment: "add the text after image and audio for the accurate last token".
-   * Images are encoded as [Content.ImageBytes] — we already have raw encoded bytes (PNG/JPEG)
-   * so we pass them directly.  If the bytes do not decode as a valid Bitmap (e.g. partial PNG
-   * header from tests), we re-encode via BitmapFactory as a fallback, mirroring the helper's
-   * `Bitmap.toPngByteArray()` path.
+   * Images are passed as [Content.ImageBytes] using the raw encoded bytes directly — no
+   * BitmapFactory decode/re-encode round-trip.  The helper's Bitmap path only exists because it
+   * starts from a [android.graphics.Bitmap]; we already have encoded bytes (PNG/JPEG) and
+   * [Content.ImageBytes] accepts them as-is.  Removing the round-trip also eliminates Android-API
+   * surface (BitmapFactory, Bitmap.compress) from this pure-data method.
    */
   private fun buildContents(prompt: String, images: List<ByteArray>): Contents {
     val contents = mutableListOf<Content>()
     for (rawBytes in images) {
-      // Prefer direct byte pass-through; fall back to decode+re-encode via BitmapFactory
-      // (mirrors helper's Bitmap.toPngByteArray() for cases where format is non-PNG).
-      val pngBytes = try {
-        val bitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
-        if (bitmap != null) {
-          val out = ByteArrayOutputStream()
-          bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
-          out.toByteArray()
-        } else {
-          rawBytes // pass through as-is; let the engine reject if invalid
-        }
-      } catch (_: Exception) {
-        rawBytes
-      }
-      contents.add(Content.ImageBytes(pngBytes))
+      // Pass encoded bytes directly; let the engine validate the format.
+      contents.add(Content.ImageBytes(rawBytes))
     }
     // Add the text after image for the accurate last token (mirror helper).
     if (prompt.trim().isNotEmpty()) {
