@@ -16,7 +16,7 @@
 
 package com.google.ai.edge.gallery.farol.openai
 
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -26,13 +26,13 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 class ModelsSerializationTest {
 
-  private val lenient = Json { ignoreUnknownKeys = true }
-  // encodeDefaults=true is required so that "object", "finish_reason", etc. are emitted
-  // even though they have default values — matching the OpenAI wire format contract.
-  private val encoder = Json { encodeDefaults = true }
+  // Use shared codec instances — same objects that routes use in production.
+  private val lenient = OpenAIDecoder
+  private val encoder = OpenAIJson
 
   // ── ChatCompletionRequest ────────────────────────────────────────────────
 
@@ -212,5 +212,26 @@ class ModelsSerializationTest {
     val encoded = encoder.encodeToString(ErrorResponse.serializer(), err)
     assertTrue(encoded.contains("\"message\":\"Not found\""))
     assertTrue(encoded.contains("\"type\":\"invalid_request_error\""))
+  }
+
+  // ── OpenAIJson codec regression ──────────────────────────────────────────
+  // Ensures the shared OpenAIJson codec has encodeDefaults=true; if someone
+  // accidentally constructs a local Json{} without it, default-valued fields
+  // like "object":"chat.completion" would be silently omitted from the wire.
+
+  @Test
+  fun `OpenAIJson emits object chat completion (encodeDefaults guard)`() {
+    val resp = ChatCompletionResponse(
+      id = "chatcmpl-guard",
+      created = 9999L,
+      model = "farol-v1",
+      choices = listOf(Choice(message = AssistantMessage(content = "ok"))),
+      usage = Usage(promptTokens = 1, completionTokens = 1, totalTokens = 2),
+    )
+    val encoded = OpenAIJson.encodeToString(ChatCompletionResponse.serializer(), resp)
+    assertTrue(
+      encoded.contains("\"object\":\"chat.completion\""),
+      "OpenAIJson must emit default-valued 'object' field; check encodeDefaults=true",
+    )
   }
 }

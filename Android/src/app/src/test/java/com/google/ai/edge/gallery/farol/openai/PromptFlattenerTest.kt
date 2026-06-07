@@ -16,6 +16,7 @@
 
 package com.google.ai.edge.gallery.farol.openai
 
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -24,10 +25,11 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class PromptFlattenerTest {
 
-  // A tiny 3-byte PNG header encoded in base64 (not a real PNG, just 3 bytes: 0x89, 0x50, 0x4E)
+  // First 3 bytes of the PNG magic number (0x89, 0x50, 0x4E) encoded in base64 — not a real PNG.
   private val TINY_BASE64 = "iVBO"
   private val TINY_BYTES = byteArrayOf(0x89.toByte(), 0x50.toByte(), 0x4E.toByte())
 
@@ -150,6 +152,58 @@ class PromptFlattenerTest {
     assertFailsWith<IllegalArgumentException> {
       PromptFlattener.flatten(messages)
     }
+  }
+
+  @Test
+  fun `empty message list returns empty prompt and no images`() {
+    val result = PromptFlattener.flatten(emptyList())
+    assertEquals("", result.promptText)
+    assertEquals(0, result.images.size)
+  }
+
+  @Test
+  fun `JsonNull content throws IllegalArgumentException`() {
+    val messages = listOf(ChatMessage(role = "user", content = JsonNull))
+    assertFailsWith<IllegalArgumentException> {
+      PromptFlattener.flatten(messages)
+    }
+  }
+
+  @Test
+  fun `data URL without comma throws IllegalArgumentException`() {
+    val parts = buildJsonArray {
+      add(buildJsonObject {
+        put("type", "image_url")
+        put("image_url", buildJsonObject {
+          put("url", "data:image/png;base64NO_COMMA_HERE")
+        })
+      })
+    }
+    val messages = listOf(ChatMessage(role = "user", content = parts))
+    assertFailsWith<IllegalArgumentException> {
+      PromptFlattener.flatten(messages)
+    }
+  }
+
+  @Test
+  fun `malformed base64 throws IllegalArgumentException with Malformed base64 message`() {
+    val parts = buildJsonArray {
+      add(buildJsonObject {
+        put("type", "image_url")
+        put("image_url", buildJsonObject {
+          // valid data URL structure but base64 payload is garbage
+          put("url", "data:image/png;base64,!!!not-valid-base64!!!")
+        })
+      })
+    }
+    val messages = listOf(ChatMessage(role = "user", content = parts))
+    val ex = assertFailsWith<IllegalArgumentException> {
+      PromptFlattener.flatten(messages)
+    }
+    assertTrue(
+      ex.message?.contains("Malformed base64") == true,
+      "Expected 'Malformed base64' in exception message, got: ${ex.message}",
+    )
   }
 
   @Test

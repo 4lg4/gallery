@@ -38,8 +38,29 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 object PromptFlattener {
 
+  /**
+   * Holds the result of flattening a list of [ChatMessage]s.
+   *
+   * @property promptText All text segments from all messages joined with "\n\n".
+   * @property images Raw bytes of every image part, in the order they appeared.
+   *
+   * **Equality caveat:** [FlatPrompt] is a data class, but [List.equals] on
+   * [List]<[ByteArray]> uses **reference equality** for each [ByteArray] element,
+   * not content equality.  Two [FlatPrompt] instances built from identical input
+   * will NOT be `==` if they hold different [ByteArray] objects.  Use
+   * [assertContentEquals] (in tests) or compare element-by-element in production code.
+   */
   data class FlatPrompt(val promptText: String, val images: List<ByteArray>)
 
+  /**
+   * Converts [messages] into a [FlatPrompt].
+   *
+   * **Role-collapse limitation:** roles (system / user / assistant) are not
+   * distinguished in the output — all text segments are joined with "\n\n" in
+   * encounter order with no role tokens inserted.  The on-device model receives a
+   * single undifferentiated string.  Callers that need role-aware formatting must
+   * pre-process the message list before calling [flatten].
+   */
   fun flatten(messages: List<ChatMessage>): FlatPrompt {
     val textSegments = mutableListOf<String>()
     val images = mutableListOf<ByteArray>()
@@ -84,7 +105,12 @@ object PromptFlattener {
                   throw IllegalArgumentException("Malformed data URL (no comma): $url")
                 }
                 val b64 = url.substring(commaIdx + 1)
-                images.add(Base64.getDecoder().decode(b64))
+                val decoded = try {
+                  Base64.getDecoder().decode(b64)
+                } catch (e: IllegalArgumentException) {
+                  throw IllegalArgumentException("Malformed base64 in data URL: $url", e)
+                }
+                images.add(decoded)
               }
               else -> throw IllegalArgumentException("Unknown part type: $type")
             }

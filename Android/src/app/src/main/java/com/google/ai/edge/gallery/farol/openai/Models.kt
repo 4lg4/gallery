@@ -18,7 +18,19 @@ package com.google.ai.edge.gallery.farol.openai
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+
+// ── Shared codec instances ────────────────────────────────────────────────────
+// Use these everywhere so codec configuration cannot drift between routes.
+
+/** Encoder for outgoing OpenAI-compatible responses.  encodeDefaults=true ensures
+ *  fields such as "object" and "finish_reason" are always present on the wire. */
+val OpenAIJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+
+/** Decoder for incoming client requests.  ignoreUnknownKeys=true tolerates future
+ *  OpenAI fields we don't yet handle. */
+val OpenAIDecoder = Json { ignoreUnknownKeys = true }
 
 // ── Request ──────────────────────────────────────────────────────────────────
 
@@ -120,4 +132,6 @@ data class ErrorResponse(
 data class ErrorBody(
   val message: String,
   val type: String = "invalid_request_error",
+  // TODO(v2): add `param: String? = null` and `code: String? = null` for OpenAI Python SDK
+  //  error-parse compatibility (openai.BadRequestError.param / .code).
 )
