@@ -14,7 +14,7 @@ TEST_KEY_LINK="$REPO_ROOT/.farol/farol.key"
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 cleanup() {
   [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true
-  rm -f "$REPO_ROOT/.farol/smoke_test.key" "$MOCK_PY" "$TEST_KEY_LINK"
+  rm -f "$REPO_ROOT/.farol/smoke_test.key" "$REPO_ROOT/.farol/smoke_test.png" "$MOCK_PY" "$TEST_KEY_LINK"
 }
 trap cleanup EXIT
 
@@ -22,6 +22,14 @@ trap cleanup EXIT
 mkdir -p "$REPO_ROOT/.farol"
 GOOD_KEY="smoketestkey00000000000000000000000000000000000000"
 echo "$GOOD_KEY" > "$REPO_ROOT/.farol/smoke_test.key"
+
+# Write a minimal 1×1 white PNG for vision endpoint tests.
+TEST_IMAGE="$REPO_ROOT/.farol/smoke_test.png"
+python3 -c "
+import base64, sys
+data = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==')
+sys.stdout.buffer.write(data)
+" > "$TEST_IMAGE"
 
 # ── Write mock server Python script ──────────────────────────────────────────
 cat > "$MOCK_PY" <<'PYEOF'
@@ -64,7 +72,39 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(404); self.end_headers()
 
+    def _read_multipart_body(self):
+        """Drain the request body (multipart or otherwise) to avoid connection reset."""
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 0:
+            self.rfile.read(length)
+
     def do_POST(self):
+        if self.path == "/caption":
+            if not self._auth_ok():
+                self._read_multipart_body()
+                self.send_response(401); self.end_headers(); return
+            self._read_multipart_body()
+            if MODE == "fail":
+                body = json.dumps({"error":{"message":"fail mode","type":"server_error"}}).encode()
+                self._send_json(500, body)
+                return
+            body = json.dumps({"caption":"A test image captured by the mock server.","model":MODEL_ID,"durationMs":42}).encode()
+            self._send_json(200, body)
+            return
+
+        if self.path == "/vqa":
+            if not self._auth_ok():
+                self._read_multipart_body()
+                self.send_response(401); self.end_headers(); return
+            self._read_multipart_body()
+            if MODE == "fail":
+                body = json.dumps({"error":{"message":"fail mode","type":"server_error"}}).encode()
+                self._send_json(500, body)
+                return
+            body = json.dumps({"answer":"It is a mock image used for testing.","model":MODEL_ID,"durationMs":38}).encode()
+            self._send_json(200, body)
+            return
+
         if self.path != "/v1/chat/completions":
             self.send_response(404); self.end_headers(); return
         if not self._auth_ok():
@@ -153,7 +193,7 @@ start_mock pass
 wait_for_server
 install_key
 
-PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE"
+PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE" "$TEST_IMAGE"
 
 remove_key
 stop_mock
@@ -169,7 +209,7 @@ wait_for_server
 install_key
 
 set +e
-PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE" 2>&1
+PIXEL_HOST="$MOCK_HOST" PORT="$MOCK_PORT" "$SMOKE" "$TEST_IMAGE" 2>&1
 SMOKE_EXIT=$?
 set -e
 

@@ -71,5 +71,36 @@ echo "== models (X-Farol-Key header) =="
 MODELS_ALT=$(curl -sf --max-time 10 -H "X-Farol-Key: ${API_KEY}" "${BASE_URL}/v1/models")
 echo "$MODELS_ALT" | grep -q '"id"' && pass "X-Farol-Key header accepted" || fail "X-Farol-Key: unexpected response: $MODELS_ALT"
 
+# ── g. Vision endpoints (only when an image file arg is provided) ─────────────
+# Usage: ./smoke.sh [image.jpg]
+IMAGE_FILE="${1:-}"
+if [[ -n "$IMAGE_FILE" ]]; then
+  if [[ ! -f "$IMAGE_FILE" ]]; then
+    echo "[smoke] ERROR: image file not found: $IMAGE_FILE" >&2
+    exit 1
+  fi
+
+  # g1. POST /caption
+  echo "== caption (image: $IMAGE_FILE) =="
+  CAPTION_RESP=$(curl -sf --max-time 60 \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -F "image=@${IMAGE_FILE}" \
+    "${BASE_URL}/caption")
+  echo "$CAPTION_RESP" | grep -q '"caption"' \
+    && pass "caption response contains 'caption' field" \
+    || fail "caption: unexpected response: $CAPTION_RESP"
+
+  # g2. POST /vqa
+  echo "== vqa (image: $IMAGE_FILE) =="
+  VQA_RESP=$(curl -sf --max-time 60 \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -F "image=@${IMAGE_FILE}" \
+    -F "question=What do you see in this image?" \
+    "${BASE_URL}/vqa")
+  echo "$VQA_RESP" | grep -q '"answer"' \
+    && pass "vqa response contains 'answer' field" \
+    || fail "vqa: unexpected response: $VQA_RESP"
+fi
+
 echo ""
 echo "ALL SMOKE TESTS PASSED"

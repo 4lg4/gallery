@@ -121,6 +121,22 @@ data class ModelInfo(
   @SerialName("owned_by") val ownedBy: String = "farol",
 )
 
+// ── Vision convenience responses ─────────────────────────────────────────────
+
+@Serializable
+data class CaptionResponse(
+  val caption: String,
+  val model: String,
+  @SerialName("durationMs") val durationMs: Long,
+)
+
+@Serializable
+data class VqaResponse(
+  val answer: String,
+  val model: String,
+  @SerialName("durationMs") val durationMs: Long,
+)
+
 // ── Error ─────────────────────────────────────────────────────────────────────
 
 @Serializable

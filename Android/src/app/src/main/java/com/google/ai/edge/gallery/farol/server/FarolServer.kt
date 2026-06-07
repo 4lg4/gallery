@@ -20,9 +20,11 @@ import com.google.ai.edge.gallery.farol.engine.InferenceEngine
 import com.google.ai.edge.gallery.farol.openai.ErrorBody
 import com.google.ai.edge.gallery.farol.openai.ErrorResponse
 import com.google.ai.edge.gallery.farol.openai.OpenAIJson
+import com.google.ai.edge.gallery.farol.server.routes.captionRoute
 import com.google.ai.edge.gallery.farol.server.routes.chatCompletionsRoute
 import com.google.ai.edge.gallery.farol.server.routes.healthRoute
 import com.google.ai.edge.gallery.farol.server.routes.modelsRoute
+import com.google.ai.edge.gallery.farol.server.routes.vqaRoute
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
@@ -92,6 +94,8 @@ fun Application.farolModule(engine: InferenceEngine, apiKey: String) {
     healthRoute(engine)
     modelsRoute(engine, apiKey)
     chatCompletionsRoute(engine, apiKey)
+    captionRoute(engine, apiKey)
+    vqaRoute(engine, apiKey)
   }
 }
 
