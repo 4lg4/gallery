@@ -1,0 +1,120 @@
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.ai.edge.gallery.farol.engine
+
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * Verifies that [FakeInferenceEngine] satisfies the [InferenceEngine] contract and that the
+ * interface is implementable on the JVM without native libraries.
+ */
+class FakeInferenceEngineTest {
+
+  @Test
+  fun `FakeInferenceEngine implements InferenceEngine`() {
+    // Compile-time check: assignment proves the interface is satisfied.
+    val engine: InferenceEngine = FakeInferenceEngine()
+    assertEquals("fake-model", engine.modelName)
+  }
+
+  @Test
+  fun `generateStream emits expected chunks in order`() = runBlocking {
+    val engine = FakeInferenceEngine(chunks = listOf("Hello", ", ", "world", "!"))
+    val collected = engine.generateStream("prompt", emptyList(), 128, null).toList()
+    assertEquals(listOf("Hello", ", ", "world", "!"), collected)
+  }
+
+  @Test
+  fun `generateStream emits single chunk`() = runBlocking {
+    val engine = FakeInferenceEngine(chunks = listOf("hi"))
+    val collected = engine.generateStream("x", emptyList(), 64, null).toList()
+    assertEquals(listOf("hi"), collected)
+  }
+
+  @Test
+  fun `generate joins chunks into full text`() = runBlocking {
+    val engine = FakeInferenceEngine(chunks = listOf("A", "B", "C"))
+    val result = engine.generate("prompt", emptyList(), 256, null)
+    assertEquals("ABC", result.text)
+  }
+
+  @Test
+  fun `generate records last call arguments`() = runBlocking {
+    val engine = FakeInferenceEngine()
+    val img = byteArrayOf(1, 2, 3)
+    engine.generate("test prompt", listOf(img), 512, 0.7f)
+    assertEquals("test prompt", engine.lastPrompt)
+    assertEquals(1, engine.lastImages?.size)
+    assertEquals(512, engine.lastMaxTokens)
+    assertEquals(0.7f, engine.lastTemperature)
+  }
+
+  @Test
+  fun `generate estimates token counts when overrides not set`() = runBlocking {
+    val engine = FakeInferenceEngine(chunks = listOf("hello"))
+    val result = engine.generate("test", emptyList(), 64, null)
+    assertTrue(result.promptTokens >= 1)
+    assertTrue(result.completionTokens >= 1)
+  }
+
+  @Test
+  fun `generate uses token overrides when provided`() = runBlocking {
+    val engine = FakeInferenceEngine(
+      chunks = listOf("x"),
+      promptTokensOverride = 42,
+      completionTokensOverride = 7,
+    )
+    val result = engine.generate("any", emptyList(), 64, null)
+    assertEquals(42, result.promptTokens)
+    assertEquals(7, result.completionTokens)
+  }
+
+  @Test
+  fun `close sets closeCalled flag`() {
+    val engine = FakeInferenceEngine()
+    assertFalse(engine.closeCalled)
+    engine.close()
+    assertTrue(engine.closeCalled)
+  }
+
+  @Test
+  fun `generateStream with custom model name`() = runBlocking {
+    val engine: InferenceEngine = FakeInferenceEngine(modelName = "my-custom-model")
+    assertEquals("my-custom-model", engine.modelName)
+  }
+
+  @Test
+  fun `GenerationResult data class equality`() {
+    val a = GenerationResult(text = "hi", promptTokens = 1, completionTokens = 2)
+    val b = GenerationResult(text = "hi", promptTokens = 1, completionTokens = 2)
+    assertEquals(a, b)
+  }
+
+  @Test
+  fun `GenerationResult copy with different text`() {
+    val original = GenerationResult(text = "hello", promptTokens = 5, completionTokens = 3)
+    val copy = original.copy(text = "world")
+    assertEquals("world", copy.text)
+    assertEquals(5, copy.promptTokens)
+    assertEquals(3, copy.completionTokens)
+  }
+}
