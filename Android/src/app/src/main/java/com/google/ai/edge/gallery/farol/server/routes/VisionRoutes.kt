@@ -22,6 +22,8 @@ import com.google.ai.edge.gallery.farol.openai.ErrorBody
 import com.google.ai.edge.gallery.farol.openai.ErrorResponse
 import com.google.ai.edge.gallery.farol.openai.VqaResponse
 import com.google.ai.edge.gallery.farol.server.Auth
+import com.google.ai.edge.gallery.farol.server.FarolEndpoint
+import com.google.ai.edge.gallery.farol.server.Metrics
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.PartData
 import io.ktor.http.content.forEachPart
@@ -53,16 +55,21 @@ private data class MultipartVisionRequest(
  *
  * The 20 MB Content-Length guard mirrors the pattern used in [chatCompletionsRoute].
  * Chunked bodies without a Content-Length header are trusted (LAN-only server).
+ *
+ * Returns `null` when a 413 response has already been sent (payload too large), so callers
+ * must return immediately without touching the response again.  Non-"image" file parts are
+ * intentionally ignored — only the first "image" file part is consumed; additional file parts
+ * (e.g. multi-attachment uploads) are read and discarded to drain the multipart stream cleanly.
  */
-private suspend fun io.ktor.server.application.ApplicationCall.receiveVisionMultipart(): MultipartVisionRequest {
+private suspend fun io.ktor.server.application.ApplicationCall.receiveVisionMultipart(): MultipartVisionRequest? {
   val contentLength = request.contentLength()
   if (contentLength != null && contentLength > 20_000_000L) {
     respond(
       HttpStatusCode.PayloadTooLarge,
       ErrorResponse(error = ErrorBody(message = "Request body exceeds 20 MB limit", type = "invalid_request_error")),
     )
-    // Signal to caller that response has already been sent.
-    throw IllegalStateException("response already sent: payload too large")
+    // Return null to signal that a 413 was already sent — caller must not respond again.
+    return null
   }
 
   var imageBytes: ByteArray? = null
@@ -72,6 +79,7 @@ private suspend fun io.ktor.server.application.ApplicationCall.receiveVisionMult
   multipart.forEachPart { part ->
     when (part) {
       is PartData.FileItem -> {
+        // Only the "image" file part is used; all other file parts are intentionally ignored.
         if (part.name == "image") {
           imageBytes = part.provider().toByteArray()
         }
@@ -98,7 +106,7 @@ private suspend fun io.ktor.server.application.ApplicationCall.receiveVisionMult
  * Response: [CaptionResponse] with the trimmed generated text, model name and wall-clock
  * duration in milliseconds.
  */
-fun Routing.captionRoute(engine: InferenceEngine, apiKey: String) {
+fun Routing.captionRoute(engine: InferenceEngine, apiKey: String, metrics: Metrics) {
   post("/caption") {
     val auth = call.request.headers["Authorization"]
     val farolKey = call.request.headers["X-Farol-Key"]
@@ -110,29 +118,41 @@ fun Routing.captionRoute(engine: InferenceEngine, apiKey: String) {
       return@post
     }
 
-    val parsed = call.receiveVisionMultipart()
+    val parsed = call.receiveVisionMultipart() ?: return@post  // 413 already sent
     val imageBytes = parsed.imageBytes
       ?: throw IllegalArgumentException("missing required multipart part: image")
 
     val prompt = parsed.fields["prompt"]?.takeIf { it.isNotBlank() } ?: CAPTION_DEFAULT_PROMPT
 
     val startMs = System.currentTimeMillis()
-    val result = engine.generate(
-      prompt = prompt,
-      images = listOf(imageBytes),
-      maxTokens = VISION_MAX_TOKENS,
-      temperature = VISION_TEMPERATURE,
-    )
-    val durationMs = System.currentTimeMillis() - startMs
+    var engineError = false
+    try {
+      val result = engine.generate(
+        prompt = prompt,
+        images = listOf(imageBytes),
+        maxTokens = VISION_MAX_TOKENS,
+        temperature = VISION_TEMPERATURE,
+      )
+      val durationMs = System.currentTimeMillis() - startMs
 
-    call.respond(
-      HttpStatusCode.OK,
-      CaptionResponse(
-        caption = result.text.trim(),
-        model = engine.modelName,
-        durationMs = durationMs,
-      ),
-    )
+      call.respond(
+        HttpStatusCode.OK,
+        CaptionResponse(
+          caption = result.text.trim(),
+          model = engine.modelName,
+          durationMs = durationMs,
+        ),
+      )
+    } catch (e: Throwable) {
+      engineError = true
+      throw e
+    } finally {
+      metrics.record(
+        endpoint = FarolEndpoint.CAPTION,
+        durationMs = System.currentTimeMillis() - startMs,
+        error = engineError,
+      )
+    }
   }
 }
 
@@ -146,7 +166,7 @@ fun Routing.captionRoute(engine: InferenceEngine, apiKey: String) {
  * Response: [VqaResponse] with the trimmed answer, model name and wall-clock duration in
  * milliseconds.
  */
-fun Routing.vqaRoute(engine: InferenceEngine, apiKey: String) {
+fun Routing.vqaRoute(engine: InferenceEngine, apiKey: String, metrics: Metrics) {
   post("/vqa") {
     val auth = call.request.headers["Authorization"]
     val farolKey = call.request.headers["X-Farol-Key"]
@@ -158,7 +178,7 @@ fun Routing.vqaRoute(engine: InferenceEngine, apiKey: String) {
       return@post
     }
 
-    val parsed = call.receiveVisionMultipart()
+    val parsed = call.receiveVisionMultipart() ?: return@post  // 413 already sent
     val imageBytes = parsed.imageBytes
       ?: throw IllegalArgumentException("missing required multipart part: image")
 
@@ -168,21 +188,33 @@ fun Routing.vqaRoute(engine: InferenceEngine, apiKey: String) {
     val prompt = "Answer the question about this image. Be direct and factual.\n\nQuestion: $question"
 
     val startMs = System.currentTimeMillis()
-    val result = engine.generate(
-      prompt = prompt,
-      images = listOf(imageBytes),
-      maxTokens = VISION_MAX_TOKENS,
-      temperature = VISION_TEMPERATURE,
-    )
-    val durationMs = System.currentTimeMillis() - startMs
+    var engineError = false
+    try {
+      val result = engine.generate(
+        prompt = prompt,
+        images = listOf(imageBytes),
+        maxTokens = VISION_MAX_TOKENS,
+        temperature = VISION_TEMPERATURE,
+      )
+      val durationMs = System.currentTimeMillis() - startMs
 
-    call.respond(
-      HttpStatusCode.OK,
-      VqaResponse(
-        answer = result.text.trim(),
-        model = engine.modelName,
-        durationMs = durationMs,
-      ),
-    )
+      call.respond(
+        HttpStatusCode.OK,
+        VqaResponse(
+          answer = result.text.trim(),
+          model = engine.modelName,
+          durationMs = durationMs,
+        ),
+      )
+    } catch (e: Throwable) {
+      engineError = true
+      throw e
+    } finally {
+      metrics.record(
+        endpoint = FarolEndpoint.VQA,
+        durationMs = System.currentTimeMillis() - startMs,
+        error = engineError,
+      )
+    }
   }
 }

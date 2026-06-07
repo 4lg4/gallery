@@ -31,6 +31,8 @@ import com.google.ai.edge.gallery.farol.openai.OpenAIJson
 import com.google.ai.edge.gallery.farol.openai.PromptFlattener
 import com.google.ai.edge.gallery.farol.openai.Usage
 import com.google.ai.edge.gallery.farol.server.Auth
+import com.google.ai.edge.gallery.farol.server.FarolEndpoint
+import com.google.ai.edge.gallery.farol.server.Metrics
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.request.contentLength
@@ -67,8 +69,11 @@ private const val DEFAULT_MAX_TOKENS = 1024
  *   they return proper HTTP status codes.  If the engine throws mid-stream (after the 200 header
  *   is committed) we emit a final `data: {"error":{...}}` event then stop — matching pragmatic
  *   OpenAI-compatible server behaviour.
+ * - `max_tokens`: accepted and forwarded to the engine, but capped at engine-init time
+ *   (LiteRT-LM `EngineConfig.maxNumTokens`, default 4096).  There is no per-request cap at the
+ *   Ktor layer.  A response header `X-Farol-MaxTokens: engine-cap` signals this to callers.
  */
-fun Routing.chatCompletionsRoute(engine: InferenceEngine, apiKey: String) {
+fun Routing.chatCompletionsRoute(engine: InferenceEngine, apiKey: String, metrics: Metrics) {
   post("/v1/chat/completions") {
     // ── Auth ──────────────────────────────────────────────────────────────────
     val auth = call.request.headers["Authorization"]
@@ -117,30 +122,48 @@ fun Routing.chatCompletionsRoute(engine: InferenceEngine, apiKey: String) {
     val created = Instant.now().epochSecond
     val modelName = engine.modelName
 
+    // Honesty signal: max_tokens is accepted but capped at engine-init time, not per-request.
+    if (request.maxTokens != null) {
+      call.response.headers.append("X-Farol-MaxTokens", "engine-cap")
+    }
+
     // ── Stream or Batch ───────────────────────────────────────────────────────
     if (request.stream) {
-      call.respondSSE(engine, flat, maxTokens, temperature, responseId, created, modelName)
+      call.respondSSE(engine, flat, maxTokens, temperature, responseId, created, modelName, metrics)
     } else {
-      val result = engine.generate(flat.promptText, flat.images, maxTokens, temperature)
-      call.respond(
-        HttpStatusCode.OK,
-        ChatCompletionResponse(
-          id = responseId,
-          created = created,
-          model = modelName,
-          choices = listOf(
-            Choice(
-              message = AssistantMessage(content = result.text),
-              finishReason = "stop",
-            )
+      val startMs = System.currentTimeMillis()
+      var engineError = false
+      try {
+        val result = engine.generate(flat.promptText, flat.images, maxTokens, temperature)
+        call.respond(
+          HttpStatusCode.OK,
+          ChatCompletionResponse(
+            id = responseId,
+            created = created,
+            model = modelName,
+            choices = listOf(
+              Choice(
+                message = AssistantMessage(content = result.text),
+                finishReason = "stop",
+              )
+            ),
+            usage = Usage(
+              promptTokens = result.promptTokens,
+              completionTokens = result.completionTokens,
+              totalTokens = result.promptTokens + result.completionTokens,
+            ),
           ),
-          usage = Usage(
-            promptTokens = result.promptTokens,
-            completionTokens = result.completionTokens,
-            totalTokens = result.promptTokens + result.completionTokens,
-          ),
-        ),
-      )
+        )
+      } catch (e: Throwable) {
+        engineError = true
+        throw e
+      } finally {
+        metrics.record(
+          endpoint = FarolEndpoint.CHAT,
+          durationMs = System.currentTimeMillis() - startMs,
+          error = engineError,
+        )
+      }
     }
   }
 }
@@ -153,7 +176,9 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
   responseId: String,
   created: Long,
   modelName: String,
+  metrics: Metrics,
 ) {
+  val startMs = System.currentTimeMillis()
   response.headers.append("Cache-Control", "no-cache")
   response.headers.append("Connection", "keep-alive")
   respondTextWriter(
@@ -185,6 +210,12 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
         streamError = e
       }
       .collect()
+
+    metrics.record(
+      endpoint = FarolEndpoint.CHAT,
+      durationMs = System.currentTimeMillis() - startMs,
+      error = streamError != null,
+    )
 
     if (streamError != null) {
       // Mid-stream error: emit error event then stop (header already committed)

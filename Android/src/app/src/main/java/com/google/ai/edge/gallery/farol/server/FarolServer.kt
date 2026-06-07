@@ -23,6 +23,7 @@ import com.google.ai.edge.gallery.farol.openai.OpenAIJson
 import com.google.ai.edge.gallery.farol.server.routes.captionRoute
 import com.google.ai.edge.gallery.farol.server.routes.chatCompletionsRoute
 import com.google.ai.edge.gallery.farol.server.routes.healthRoute
+import com.google.ai.edge.gallery.farol.server.routes.metricsRoute
 import com.google.ai.edge.gallery.farol.server.routes.modelsRoute
 import com.google.ai.edge.gallery.farol.server.routes.vqaRoute
 import io.ktor.http.HttpStatusCode
@@ -48,8 +49,15 @@ import kotlinx.serialization.SerializationException
  * - [IllegalArgumentException] → 400 `invalid_request_error`
  * - [SerializationException] → 400 `invalid_request_error`
  * - Any other [Throwable] → 500 `server_error`
+ *
+ * @param metrics Optional [Metrics] instance; a new one is created when null (production default).
+ *   Pass an instance explicitly in tests to assert counter state after requests.
  */
-fun Application.farolModule(engine: InferenceEngine, apiKey: String) {
+fun Application.farolModule(
+  engine: InferenceEngine,
+  apiKey: String,
+  metrics: Metrics = Metrics(),
+) {
   install(ContentNegotiation) {
     json(OpenAIJson)
   }
@@ -93,9 +101,10 @@ fun Application.farolModule(engine: InferenceEngine, apiKey: String) {
   routing {
     healthRoute(engine)
     modelsRoute(engine, apiKey)
-    chatCompletionsRoute(engine, apiKey)
-    captionRoute(engine, apiKey)
-    vqaRoute(engine, apiKey)
+    chatCompletionsRoute(engine, apiKey, metrics)
+    captionRoute(engine, apiKey, metrics)
+    vqaRoute(engine, apiKey, metrics)
+    metricsRoute(engine, apiKey, metrics)
   }
 }
 

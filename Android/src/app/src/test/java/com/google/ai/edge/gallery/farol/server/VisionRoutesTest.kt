@@ -173,6 +173,26 @@ class VisionRoutesTest {
   }
 
   @Test
+  fun `caption blank prompt field falls back to default prompt`() = testApplication {
+    val fake = FakeInferenceEngine()
+    application { farolModule(fake, API_KEY) }
+    client.post("/caption") {
+      header("Authorization", "Bearer $API_KEY")
+      setBody(MultiPartFormDataContent(formData {
+        append("image", TINY_PNG, Headers.build {
+          append(HttpHeaders.ContentDisposition, "form-data; name=\"image\"; filename=\"img.png\"")
+        })
+        append("prompt", "   ")  // blank (whitespace-only) — should fall back to default
+      }))
+    }
+    assertEquals(
+      "Describe this image in 2-3 concise sentences.",
+      fake.lastPrompt,
+      "blank prompt field should fall back to the default caption prompt",
+    )
+  }
+
+  @Test
   fun `caption uses custom prompt when prompt field given`() = testApplication {
     val fake = FakeInferenceEngine()
     application { farolModule(fake, API_KEY) }

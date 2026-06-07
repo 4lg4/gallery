@@ -17,6 +17,14 @@ exempting the app from Doze so the server survives reboots and background kills.
 
 `.farol/farol.key` is gitignored. Back it up separately or re-run `push-key.sh` to rotate.
 
+## API notes
+
+- `max_tokens`: accepted and forwarded to the engine, but capped at engine-init time
+  (`EngineConfig.maxNumTokens`, default 4096). There is no per-request token cap at the HTTP layer.
+  Responses include the header `X-Farol-MaxTokens: engine-cap` when `max_tokens` was provided.
+- `GET /metrics` (auth required): returns uptime, request/error counts per endpoint, last-request
+  duration, and the loaded model name.
+
 ## Design doc
 
 `AGLA-CLAUDE/projects/pixel-edge-inference-appliance.md` (and the FAROL plan at `docs/superpowers/plans/2026-06-05-farol-pixel-llm-server.md`).
