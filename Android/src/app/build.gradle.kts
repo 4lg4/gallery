@@ -124,6 +124,15 @@ dependencies {
   implementation(libs.mcp.kotlin.sdk)
   implementation(libs.ktor.client.android)
   implementation(libs.ktor.client.core)
+  // FAROL — Ktor embedded server (LAN LLM inference)
+  implementation(libs.ktor.server.cio)
+  implementation(libs.ktor.server.content.negotiation)
+  implementation(libs.ktor.serialization.kotlinx.json)
+  implementation(libs.ktor.server.status.pages)
+  implementation(libs.ktor.server.sse)
+  testImplementation(libs.ktor.server.test.host)
+  testImplementation(libs.ktor.client.content.negotiation)
+  testImplementation(kotlin("test"))
 }
 
 protobuf {
