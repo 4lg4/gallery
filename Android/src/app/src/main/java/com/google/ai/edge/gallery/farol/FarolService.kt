@@ -16,6 +16,7 @@
 
 package com.google.ai.edge.gallery.farol
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -32,8 +33,10 @@ import io.ktor.server.engine.EmbeddedServer
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private const val TAG = "FarolService"
@@ -63,6 +66,19 @@ private const val PORT = 8080
  * because the OS will reclaim native resources when the process exits; the Thread merely gives
  * in-flight requests a best-effort grace window (server: 5 s, engine: unbounded).
  *
+ * ## Startup/teardown race
+ * [LiteRtLmEngine] construction takes 10–30 s and is non-cancellable.  If [onDestroy] fires
+ * during that window, [scope].cancel() marks the coroutine cancelled but cannot interrupt the
+ * blocking native call.  To prevent leaking a fully-constructed engine or server:
+ * - The startup coroutine checks [isActive] immediately after each expensive step.
+ * - If cancelled, it self-cleans the just-created object and returns without writing to the
+ *   shared [engine]/[server] fields.
+ * - [onDestroy] calls [startupJob]?.cancel() then takes a snapshot of the shared fields; the
+ *   in-coroutine gates handle cleanup of objects created after the snapshot.
+ * - A residual tiny window exists between the `isActive` check and the field assignment, but it
+ *   is acceptable: the assignment is two adjacent non-suspending lines, and onDestroy's teardown
+ *   thread + the coroutine's self-cleanup both cover each side of the race independently.
+ *
  * ## Idempotency
  * [onStartCommand] checks [started] before launching the startup coroutine.  Double-starts from
  * [BootReceiver] + [MainActivity] are safe and simply return [START_STICKY].
@@ -76,6 +92,7 @@ class FarolService : Service() {
   // ── Runtime state (nullable = not yet started) ───────────────────────────
 
   @Volatile private var started = false
+  @Volatile private var startupJob: Job? = null
   @Volatile private var engine: LiteRtLmEngine? = null
   @Volatile private var server: EmbeddedServer<*, *>? = null
   @Volatile private var wakeLock: PowerManager.WakeLock? = null
@@ -94,6 +111,9 @@ class FarolService : Service() {
 
   override fun onBind(intent: Intent?): IBinder? = null
 
+  // @SuppressLint: intentional — FAROL is an always-on appliance; the wake lock must be held
+  // indefinitely so the CPU stays awake for LAN inference while the screen is off.
+  @SuppressLint("WakelockTimeout")
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     // Immediate startForeground crash guard — must be called before any async work.
     startForeground(NOTIFICATION_ID, buildNotification("starting…"))
@@ -110,7 +130,7 @@ class FarolService : Service() {
       it.acquire()
     }
 
-    scope.launch {
+    startupJob = scope.launch {
       try {
         // ── a. Read API key ───────────────────────────────────────────────
         val keyFile = File(filesDir, "farol.key")
@@ -135,18 +155,39 @@ class FarolService : Service() {
           return@launch
         }
 
-        // ── c. Load engine (slow) ─────────────────────────────────────────
+        // ── c. Load engine (slow, non-cancellable) ────────────────────────
+        // LiteRtLmEngine construction blocks a native thread for 10–30 s and cannot be
+        // interrupted.  We check isActive immediately after it returns so that a concurrent
+        // onDestroy (which calls startupJob?.cancel()) causes self-cleanup here rather than
+        // leaking a fully-initialised engine.
         updateNotification(ServiceState.NotificationState.Loading)
         Log.d(TAG, "Initialising engine from ${modelFile.absolutePath}")
         val liteRtEngine = LiteRtLmEngine(
           modelPath = modelFile.absolutePath,
           modelDisplayName = ModelLocator.MODEL_NAME,
         )
+        // Race gate A: onDestroy may have fired during the blocking init above.
+        // Self-clean before touching any shared field so the teardown thread's snapshot is safe.
+        if (!isActive) {
+          Log.w(TAG, "Cancelled during engine init — closing leaked engine")
+          runCatching { liteRtEngine.close() }
+          return@launch
+        }
         engine = liteRtEngine
         Log.d(TAG, "Engine ready")
 
         // ── d. Start Ktor server ──────────────────────────────────────────
         val embeddedServer = startFarolServer(liteRtEngine, apiKey, PORT)
+        // Race gate B: onDestroy may have fired between engine assignment and here.
+        // Self-clean server + engine before returning so nothing leaks.
+        // Note: engine is already in the shared field at this point — onDestroy's teardown
+        // thread will handle it if it fired after gate A; we only need to handle the server.
+        if (!isActive) {
+          Log.w(TAG, "Cancelled during server start — tearing down server + engine")
+          runCatching { embeddedServer.stop(gracePeriodMillis = 0, timeoutMillis = 0) }
+          // engine field was already assigned; teardown thread covers it via its snapshot.
+          return@launch
+        }
         server = embeddedServer
         Log.d(TAG, "Server started on :$PORT")
 
@@ -168,9 +209,18 @@ class FarolService : Service() {
   override fun onDestroy() {
     super.onDestroy()
     Log.d(TAG, "onDestroy — cancelling scope")
+
+    // Cancel the startup job first so the in-coroutine isActive gates fire and self-clean any
+    // objects created after this thread's field snapshot below.  We do NOT join/await here
+    // (startup can block for 30 s); the coroutine's own gates handle the race independently.
+    startupJob?.cancel()
     scope.cancel()
 
     // Capture refs before nulling so the thread closure sees them.
+    // Division of responsibility for the startup/teardown race:
+    //   - Objects assigned to shared fields BEFORE scope.cancel() → captured here, cleaned below.
+    //   - Objects created AFTER scope.cancel() (inside the still-running native call) → the
+    //     in-coroutine isActive gates self-clean them and never write to the shared fields.
     val capturedServer = server
     val capturedEngine = engine
     val capturedWakeLock = wakeLock

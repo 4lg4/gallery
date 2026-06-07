@@ -19,9 +19,25 @@ package com.google.ai.edge.gallery.farol
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
+
+private const val TAG = "BootReceiver"
 
 /**
  * FAROL — Starts [FarolService] after device boot.
+ *
+ * ## Battery-optimisation exemption required for API 35+
+ * Android 15 (API 35) restricts foreground-service starts from
+ * [Intent.ACTION_BOOT_COMPLETED] receivers unless the app is on the
+ * battery-optimisation allowlist.  The FAROL appliance setup script (Task 6)
+ * grants this via:
+ * ```
+ * adb shell dumpsys deviceidle whitelist +com.google.aiedge.gallery
+ * ```
+ * Without the exemption, [startForegroundService] throws
+ * [android.app.ForegroundServiceStartNotAllowedException] (a subclass of
+ * [IllegalStateException]) on API 35+.  The call is wrapped in a try/catch so
+ * a missing exemption produces a clear log instead of a silent crash.
  *
  * TODO: Task 2 — gate on a user preference before auto-starting.
  */
@@ -29,7 +45,19 @@ class BootReceiver : BroadcastReceiver() {
 
   override fun onReceive(context: Context, intent: Intent) {
     if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-      context.startForegroundService(Intent(context, FarolService::class.java))
+      try {
+        context.startForegroundService(Intent(context, FarolService::class.java))
+      } catch (e: IllegalStateException) {
+        // ForegroundServiceStartNotAllowedException (API 35+) is thrown when the app is
+        // not on the battery-optimisation allowlist.  Grant the exemption with:
+        //   adb shell dumpsys deviceidle whitelist +com.google.aiedge.gallery
+        Log.e(
+          TAG,
+          "Cannot start FarolService from boot — grant battery-optimisation exemption: " +
+            "adb shell dumpsys deviceidle whitelist +com.google.aiedge.gallery",
+          e,
+        )
+      }
     }
   }
 }
