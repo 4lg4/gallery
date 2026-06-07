@@ -36,8 +36,10 @@ data class GenerationResult(
  *
  * Implementations must be thread-safe: concurrent [generate] / [generateStream] calls must be
  * serialized internally (e.g. via a [kotlinx.coroutines.sync.Mutex]).
+ *
+ * Implements [java.io.Closeable] so engines can be used in try-with-resources / `use {}` blocks.
  */
-interface InferenceEngine {
+interface InferenceEngine : java.io.Closeable {
 
   /** The display name of the loaded model (e.g. "Gemma-4-E4B-it"). */
   val modelName: String
@@ -50,7 +52,8 @@ interface InferenceEngine {
    *
    * @param prompt Flattened text prompt.
    * @param images Raw encoded image bytes (PNG/JPEG) to prepend before the text.
-   * @param maxTokens Maximum number of tokens to generate.
+   * @param maxTokens Maximum number of tokens to generate.  Best-effort: the implementation may
+   *   apply this cap at engine-init time rather than per-request (see concrete class KDoc).
    * @param temperature Sampling temperature, or null to use the engine default.
    * @return [GenerationResult] with the generated text and token counts.
    */
@@ -72,7 +75,8 @@ interface InferenceEngine {
    *
    * @param prompt Flattened text prompt.
    * @param images Raw encoded image bytes (PNG/JPEG) to prepend before the text.
-   * @param maxTokens Maximum number of tokens to generate.
+   * @param maxTokens Maximum number of tokens to generate.  Best-effort: the implementation may
+   *   apply this cap at engine-init time rather than per-request (see concrete class KDoc).
    * @param temperature Sampling temperature, or null to use the engine default.
    * @return [Flow] of text chunks.
    */
@@ -88,5 +92,5 @@ interface InferenceEngine {
    *
    * After [close] the engine must not be used.
    */
-  fun close()
+  override fun close()
 }

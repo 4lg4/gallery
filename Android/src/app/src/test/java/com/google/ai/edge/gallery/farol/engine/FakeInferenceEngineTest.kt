@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -116,5 +117,37 @@ class FakeInferenceEngineTest {
     assertEquals("world", copy.text)
     assertEquals(5, copy.promptTokens)
     assertEquals(3, copy.completionTokens)
+  }
+
+  // ── throwOnGenerate error-path tests ─────────────────────────────────────
+
+  @Test
+  fun `generate throws when throwOnGenerate is set`() = runBlocking {
+    val boom = RuntimeException("engine exploded")
+    val engine = FakeInferenceEngine(
+      chunks = listOf("partial"),
+      throwOnGenerate = boom,
+    )
+    val thrown = assertFailsWith<RuntimeException> {
+      engine.generate("prompt", emptyList(), 64, null)
+    }
+    assertEquals("engine exploded", thrown.message)
+    // call was still recorded before the throw
+    assertEquals("prompt", engine.lastPrompt)
+  }
+
+  @Test
+  fun `generateStream emits chunks then throws when throwOnGenerate is set`() = runBlocking {
+    val boom = IllegalStateException("mid-stream failure")
+    val engine = FakeInferenceEngine(
+      chunks = listOf("A", "B", "C"),
+      throwOnGenerate = boom,
+    )
+    val collected = mutableListOf<String>()
+    val thrown = assertFailsWith<IllegalStateException> {
+      engine.generateStream("prompt", emptyList(), 64, null).collect { collected.add(it) }
+    }
+    assertEquals(listOf("A", "B", "C"), collected)
+    assertEquals("mid-stream failure", thrown.message)
   }
 }

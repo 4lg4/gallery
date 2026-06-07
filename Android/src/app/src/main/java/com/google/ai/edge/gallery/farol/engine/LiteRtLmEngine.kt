@@ -27,10 +27,13 @@ import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 
 private const val TAG = "LiteRtLmEngine"
@@ -104,6 +107,10 @@ class LiteRtLmEngine(
   /**
    * Returns a [Flow] that emits text chunks as they arrive from [MessageCallback.onMessage].
    *
+   * ## maxTokens
+   * Not consumed per-request in LiteRT-LM 0.11.0 — the engine-level cap is set at init time via
+   * [initMaxTokens].  The parameter is accepted for interface compatibility and future support.
+   *
    * ## Mutex unlock contract
    * The [mutex] is acquired once, before [createConversation], and released exactly once via the
    * [releasedOnce] guard — on whichever of the three exit paths fires first:
@@ -123,68 +130,76 @@ class LiteRtLmEngine(
     images: List<ByteArray>,
     maxTokens: Int,
     temperature: Float?,
-  ): Flow<String> = callbackFlow {
-    // Acquire the mutex for the full flow lifetime.
-    mutex.lock()
-    Log.d(TAG, "generateStream: acquired mutex, prompt=${prompt.take(80)}...")
-
-    // Guard: exactly one path may call mutex.unlock().
-    val releasedOnce = AtomicBoolean(false)
-    fun releaseMutex() {
-      if (releasedOnce.compareAndSet(false, true)) mutex.unlock()
+  ): Flow<String> {
+    // Validate before returning the flow so IllegalArgumentException is thrown at call site,
+    // not deferred to collection time — and without touching the mutex.
+    require(prompt.isNotBlank() || images.isNotEmpty()) {
+      "generateStream: prompt must be non-blank or at least one image must be provided"
     }
+    // Producer is GPU-throttled and bounded by maxNumTokens, so unbounded buffering is safe.
+    return callbackFlow {
+      // Acquire the mutex for the full flow lifetime.
+      mutex.lock()
+      Log.d(TAG, "generateStream: acquired mutex, prompt=${prompt.take(80)}...")
 
-    // Path A: createConversation itself may throw (e.g. native OOM, bad model state).
-    val conversation = try {
-      createConversation(temperature)
-    } catch (e: Exception) {
-      Log.e(TAG, "generateStream: createConversation failed", e)
-      releaseMutex() // Path A unlock
-      close(e)
-      return@callbackFlow
-    }
+      // Guard: exactly one path may call mutex.unlock().
+      val releasedOnce = AtomicBoolean(false)
+      fun releaseMutex() {
+        if (releasedOnce.compareAndSet(false, true)) mutex.unlock()
+      }
 
-    // Path B: sendMessageAsync setup failure (e.g. buildContents, engine API error).
-    try {
-      val contents = buildContents(prompt, images)
-      conversation.sendMessageAsync(
-        contents,
-        object : MessageCallback {
-          override fun onMessage(message: Message) {
-            // Mirror helper: message.toString() extracts the chunk text.
-            val chunk = message.toString()
-            if (chunk.isNotEmpty()) {
-              trySend(chunk)
+      // Path A: createConversation itself may throw (e.g. native OOM, bad model state).
+      val conversation = try {
+        createConversation(temperature)
+      } catch (e: Exception) {
+        Log.e(TAG, "generateStream: createConversation failed", e)
+        releaseMutex() // Path A unlock
+        close(e)
+        return@callbackFlow
+      }
+
+      // Path B: sendMessageAsync setup failure (e.g. buildContents, engine API error).
+      try {
+        val contents = buildContents(prompt, images)
+        conversation.sendMessageAsync(
+          contents,
+          object : MessageCallback {
+            override fun onMessage(message: Message) {
+              // Mirror helper: message.toString() extracts the chunk text.
+              val chunk = message.toString()
+              if (chunk.isNotEmpty()) {
+                trySend(chunk)
+              }
             }
-          }
 
-          override fun onDone() {
-            Log.d(TAG, "generateStream: onDone")
-            close() // closes the callbackFlow normally; awaitClose will run → Path C
-          }
+            override fun onDone() {
+              Log.d(TAG, "generateStream: onDone")
+              close() // closes the callbackFlow normally; awaitClose will run → Path C
+            }
 
-          override fun onError(throwable: Throwable) {
-            Log.e(TAG, "generateStream: onError", throwable)
-            close(throwable) // awaitClose will run → Path C
-          }
-        },
-        emptyMap(),
-      )
-    } catch (e: Exception) {
-      Log.e(TAG, "generateStream: sendMessageAsync setup failed", e)
-      try { conversation.close() } catch (_: Exception) {}
-      releaseMutex() // Path B unlock
-      close(e)
-      return@callbackFlow
-    }
+            override fun onError(throwable: Throwable) {
+              Log.e(TAG, "generateStream: onError", throwable)
+              close(throwable) // awaitClose will run → Path C
+            }
+          },
+          emptyMap(),
+        )
+      } catch (e: Exception) {
+        Log.e(TAG, "generateStream: sendMessageAsync setup failed", e)
+        try { conversation.close() } catch (_: Exception) {}
+        releaseMutex() // Path B unlock
+        close(e)
+        return@callbackFlow
+      }
 
-    // Path C: normal completion, onError, or cancellation — awaitClose is always called here.
-    awaitClose {
-      Log.d(TAG, "generateStream: awaitClose — cancelling conversation")
-      try { conversation.cancelProcess() } catch (_: Exception) {}
-      try { conversation.close() } catch (_: Exception) {}
-      releaseMutex() // Path C unlock
-    }
+      // Path C: normal completion, onError, or cancellation — awaitClose is always called here.
+      awaitClose {
+        Log.d(TAG, "generateStream: awaitClose — cancelling conversation")
+        try { conversation.cancelProcess() } catch (_: Exception) {}
+        try { conversation.close() } catch (_: Exception) {}
+        releaseMutex() // Path C unlock
+      }
+    }.buffer(Channel.UNLIMITED) // prevent trySend from silently dropping tokens under backpressure
   }
 
   // ── Single-shot ───────────────────────────────────────────────────────────
@@ -193,6 +208,9 @@ class LiteRtLmEngine(
    * Accumulates the full streaming output and returns a [GenerationResult].
    *
    * The mutex is held implicitly through [generateStream] for the entire duration.
+   *
+   * @param maxTokens Not consumed per-request in LiteRT-LM 0.11.0 — the engine-level cap is
+   *   applied at init time via [initMaxTokens].  Accepted for interface compatibility.
    *
    * Token counts are ESTIMATED (chars / 4) — LiteRT-LM 0.11.0 exposes no token-count API.
    */
@@ -216,14 +234,24 @@ class LiteRtLmEngine(
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
 
-  /** Closes the underlying [Engine], releasing all native resources. */
+  /**
+   * Closes the underlying [Engine], releasing all native resources.
+   *
+   * Acquires the single-flight [mutex] before closing so that teardown waits for any in-flight
+   * request to finish.  The mutex is intentionally NOT unlocked after — the engine is dead and
+   * this instance must not be used again after [close] returns.
+   */
   override fun close() {
-    Log.d(TAG, "Closing engine.")
+    Log.d(TAG, "Closing engine — waiting for in-flight request...")
+    // Block until any in-flight generate/generateStream completes, then close.
+    runBlocking { mutex.lock() }
+    Log.d(TAG, "Mutex acquired; closing engine.")
     try {
       engine.close()
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to close engine: ${e.message}")
+      Log.e(TAG, "Failed to close engine", e)
     }
+    // Intentionally no mutex.unlock() — engine is dead; instance is unusable after this point.
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────

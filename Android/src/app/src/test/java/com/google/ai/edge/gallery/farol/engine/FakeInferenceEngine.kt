@@ -18,6 +18,7 @@ package com.google.ai.edge.gallery.farol.engine
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.flow
 
 /**
  * Test-only [InferenceEngine] that emits a fixed list of chunks without touching the LiteRT-LM
@@ -29,12 +30,16 @@ import kotlinx.coroutines.flow.asFlow
  * @param promptTokensOverride If set, used as [GenerationResult.promptTokens]; else estimated.
  * @param completionTokensOverride If set, used as [GenerationResult.completionTokens]; else
  *   estimated.
+ * @param throwOnGenerate When non-null, [generateStream] emits all [chunks] then throws this
+ *   throwable (closing the flow with the error), and [generate] throws it immediately after
+ *   recording the call arguments.
  */
 class FakeInferenceEngine(
   private val chunks: List<String> = listOf("Hello", ", ", "world", "!"),
   private val promptTokensOverride: Int? = null,
   private val completionTokensOverride: Int? = null,
   override val modelName: String = "fake-model",
+  var throwOnGenerate: Throwable? = null,
 ) : InferenceEngine {
 
   /** Tracks arguments from the last [generate] or [generateStream] call (for assertion). */
@@ -57,7 +62,15 @@ class FakeInferenceEngine(
     temperature: Float?,
   ): Flow<String> {
     record(prompt, images, maxTokens, temperature)
-    return chunks.asFlow()
+    val error = throwOnGenerate
+    return if (error != null) {
+      flow {
+        chunks.forEach { emit(it) }
+        throw error
+      }
+    } else {
+      chunks.asFlow()
+    }
   }
 
   override suspend fun generate(
@@ -67,6 +80,7 @@ class FakeInferenceEngine(
     temperature: Float?,
   ): GenerationResult {
     record(prompt, images, maxTokens, temperature)
+    throwOnGenerate?.let { throw it }
     val text = chunks.joinToString("")
     return GenerationResult(
       text = text,

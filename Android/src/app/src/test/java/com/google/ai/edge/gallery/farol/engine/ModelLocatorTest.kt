@@ -80,4 +80,14 @@ class ModelLocatorTest {
       "Model file must have .litertlm extension",
     )
   }
+
+  @Test
+  fun `MODEL_NORMALIZED_NAME equals MODEL_NAME with non-alphanumeric replaced by underscore`() {
+    val expected = ModelLocator.MODEL_NAME.replace(Regex("[^a-zA-Z0-9]"), "_")
+    assertEquals(
+      expected,
+      ModelLocator.MODEL_NORMALIZED_NAME,
+      "MODEL_NORMALIZED_NAME must be MODEL_NAME with every non-alphanumeric char replaced by '_'",
+    )
+  }
 }
