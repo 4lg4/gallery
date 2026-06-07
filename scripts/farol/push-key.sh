@@ -17,7 +17,8 @@ fi
 
 echo "[push-key] Pushing key to device..."
 adb push "$KEY_FILE" /data/local/tmp/farol.key
-adb shell run-as "$APP_ID" sh -c 'cp /data/local/tmp/farol.key files/farol.key'
+# NOTE: no `sh -c` here — adb shell strips one quoting layer, which truncates the cp args.
+adb shell run-as "$APP_ID" cp /data/local/tmp/farol.key files/farol.key
 adb shell rm /data/local/tmp/farol.key
 echo "[push-key] Key installed at app filesDir/farol.key"
 
