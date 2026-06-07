@@ -33,6 +33,7 @@ import com.google.ai.edge.gallery.farol.openai.Usage
 import com.google.ai.edge.gallery.farol.server.Auth
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.request.contentLength
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondTextWriter
@@ -76,6 +77,20 @@ fun Routing.chatCompletionsRoute(engine: InferenceEngine, apiKey: String) {
       call.respond(
         HttpStatusCode.Unauthorized,
         ErrorResponse(error = ErrorBody(message = "Unauthorized", type = "authentication_error")),
+      )
+      return@post
+    }
+
+    // ── Body size cap ─────────────────────────────────────────────────────────
+    // CIO 3.4.3 has no maxRequestBodySize in Configuration, so we guard via
+    // Content-Length.  Chunked bodies without a Content-Length header are
+    // trusted (LAN-only server); they are bounded by the engine's own read
+    // timeout rather than a byte cap.
+    val contentLength = call.request.contentLength()
+    if (contentLength != null && contentLength > 20_000_000L) {
+      call.respond(
+        HttpStatusCode.PayloadTooLarge,
+        ErrorResponse(error = ErrorBody(message = "Request body exceeds 20 MB limit", type = "invalid_request_error")),
       )
       return@post
     }
@@ -158,8 +173,9 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
       choices = listOf(ChunkChoice(delta = delta, finishReason = finishReason)),
     )
 
-    // First chunk: role signal
-    sendChunk(makeChunk(Delta(role = "assistant", content = "")))
+    // First chunk: role signal — content is null (not "") to match real OpenAI
+    // mid-stream wire format where the role-only chunk carries "content":null.
+    sendChunk(makeChunk(Delta(role = "assistant", content = null)))
 
     var streamError: Throwable? = null
 

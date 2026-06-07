@@ -65,8 +65,18 @@ class AuthTest {
   }
 
   @Test
-  fun `bearer prefix is case-insensitive to check exact bearer prefix`() {
-    // "Bearer " is the exact prefix; no case folding needed per spec — just exact Bearer strip
+  fun `bearer prefix is case-insensitive - lowercase bearer accepted`() {
+    // RFC 7235: scheme token is case-insensitive
+    assertTrue(Auth.isAuthorized("bearer secret-key", null, key))
+  }
+
+  @Test
+  fun `bearer prefix is case-insensitive - uppercase BEARER accepted`() {
+    assertTrue(Auth.isAuthorized("BEARER secret-key", null, key))
+  }
+
+  @Test
+  fun `bearer prefix is case-insensitive - mixed case Bearer accepted`() {
     assertTrue(Auth.isAuthorized("Bearer secret-key", null, key))
   }
 
@@ -74,5 +84,15 @@ class AuthTest {
   fun `auth header without Bearer prefix is not authorized via auth header`() {
     // plain value without "Bearer " prefix shouldn't be accepted as bearer
     assertFalse(Auth.isAuthorized("secret-key", null, key))
+  }
+
+  @Test
+  fun `farol header with surrounding whitespace is authorized after trim`() {
+    assertTrue(Auth.isAuthorized(null, "  secret-key  ", key))
+  }
+
+  @Test
+  fun `farol header with wrong key after trim is not authorized`() {
+    assertFalse(Auth.isAuthorized(null, "  wrong-key  ", key))
   }
 }

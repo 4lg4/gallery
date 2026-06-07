@@ -59,7 +59,7 @@ class SseStreamingTest {
   }
 
   @Test
-  fun `stream first event has delta with role assistant`() = testApplication {
+  fun `stream first event has delta with role assistant and null content`() = testApplication {
     application { farolModule(FakeInferenceEngine(chunks = listOf("Hello")), SSE_KEY) }
     val resp = client.post("/v1/chat/completions") {
       header("Authorization", "Bearer $SSE_KEY")
@@ -71,6 +71,9 @@ class SseStreamingTest {
     assertTrue(events.isNotEmpty(), "no events in: $raw")
     val firstChunk = OpenAIDecoder.decodeFromString<ChatCompletionChunk>(events.first())
     assertEquals("assistant", firstChunk.choices[0].delta.role)
+    // content must be null (not "") on the role-signal chunk — matches real OpenAI wire format
+    assertEquals(null, firstChunk.choices[0].delta.content,
+      "role-signal chunk content must be null, not empty string")
   }
 
   @Test
@@ -108,7 +111,7 @@ class SseStreamingTest {
   }
 
   @Test
-  fun `stream terminates with DONE line`() = testApplication {
+  fun `stream terminates with DONE line with exact SSE framing`() = testApplication {
     application { farolModule(FakeInferenceEngine(), SSE_KEY) }
     val resp = client.post("/v1/chat/completions") {
       header("Authorization", "Bearer $SSE_KEY")
@@ -116,7 +119,30 @@ class SseStreamingTest {
       setBody("""{"stream":true,"messages":[{"role":"user","content":"hi"}]}""")
     }
     val raw = resp.bodyAsText()
-    assertTrue(raw.contains("data: [DONE]"), "no DONE in: $raw")
+    // Assert exact SSE framing: "data: [DONE]\n\n" (double newline terminates the event)
+    assertTrue(raw.contains("data: [DONE]\n\n"), "no properly-framed DONE in: $raw")
+  }
+
+  @Test
+  fun `stream with empty chunks list produces exactly role chunk stop chunk and DONE`() = testApplication {
+    // Degenerate case: engine emits zero content tokens
+    application { farolModule(FakeInferenceEngine(chunks = emptyList()), SSE_KEY) }
+    val resp = client.post("/v1/chat/completions") {
+      header("Authorization", "Bearer $SSE_KEY")
+      contentType(ContentType.Application.Json)
+      setBody("""{"stream":true,"messages":[{"role":"user","content":"hi"}]}""")
+    }
+    val raw = resp.bodyAsText()
+    val events = parseSSELines(raw)
+    // Exactly 2 JSON events: role-signal chunk + stop chunk
+    assertEquals(2, events.size, "expected [role, stop] but got: $events")
+    val roleChunk = OpenAIDecoder.decodeFromString<ChatCompletionChunk>(events[0])
+    assertEquals("assistant", roleChunk.choices[0].delta.role)
+    assertEquals(null, roleChunk.choices[0].delta.content)
+    val stopChunk = OpenAIDecoder.decodeFromString<ChatCompletionChunk>(events[1])
+    assertEquals("stop", stopChunk.choices[0].finishReason)
+    // Plus [DONE] terminates
+    assertTrue(raw.contains("data: [DONE]\n\n"), "no DONE in: $raw")
   }
 
   @Test
@@ -171,11 +197,15 @@ class SseStreamingTest {
   }
 
   /**
-   * Extracts JSON lines from SSE "data: <json>" lines, skipping [DONE] and blank lines.
+   * Extracts JSON payloads from SSE "data: <json>" lines, skipping the [DONE] sentinel.
+   *
+   * Does NOT trim the extracted payload — the server must emit exactly "data: <json>\n\n"
+   * with no trailing whitespace.  Trimming would mask malformed framing.
    */
   private fun parseSSELines(raw: String): List<String> =
-    raw.lines()
+    raw.split("\n\n")
+      .map { it.trim() }
       .filter { it.startsWith("data: ") }
-      .map { it.removePrefix("data: ").trim() }
+      .map { it.removePrefix("data: ") }
       .filter { it != "[DONE]" && it.isNotBlank() }
 }

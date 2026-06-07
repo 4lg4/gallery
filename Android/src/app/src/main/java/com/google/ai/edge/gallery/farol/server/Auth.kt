@@ -28,11 +28,13 @@ package com.google.ai.edge.gallery.farol.server
  */
 object Auth {
 
-  private const val BEARER_PREFIX = "Bearer "
-
   /**
    * Returns true when at least one of [authHeader] or [farolHeader] carries [configuredKey]
-   * exactly (after stripping the `Bearer ` prefix and trimming whitespace from [authHeader]).
+   * exactly.
+   *
+   * Bearer scheme matching is case-insensitive per RFC 7235 (so "bearer ", "BEARER ", etc.
+   * are all accepted).  The token after the prefix is trimmed of surrounding whitespace.
+   * [farolHeader] is also trimmed for consistency.
    *
    * @param authHeader Value of the `Authorization` header, or null if absent.
    * @param farolHeader Value of the `X-Farol-Key` header, or null if absent.
@@ -45,14 +47,15 @@ object Auth {
   ): Boolean {
     if (configuredKey.isBlank()) return false
 
-    // Check Authorization: Bearer <key>
-    if (authHeader != null && authHeader.startsWith(BEARER_PREFIX)) {
-      val token = authHeader.removePrefix(BEARER_PREFIX).trim()
+    // Check Authorization: Bearer <key> — RFC 7235: scheme is case-insensitive.
+    if (authHeader != null && authHeader.length >= 7 &&
+        authHeader.substring(0, 7).lowercase() == "bearer ") {
+      val token = authHeader.substring(7).trim()
       if (token == configuredKey) return true
     }
 
-    // Check X-Farol-Key: <key>
-    if (farolHeader != null && farolHeader == configuredKey) return true
+    // Check X-Farol-Key: <key> — trim for robustness.
+    if (farolHeader != null && farolHeader.trim() == configuredKey) return true
 
     return false
   }

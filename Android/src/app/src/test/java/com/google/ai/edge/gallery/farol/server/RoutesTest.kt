@@ -124,6 +124,39 @@ class RoutesTest {
     assertEquals(HttpStatusCode.Unauthorized, resp.status)
   }
 
+  // ── /v1/chat/completions — body size cap ─────────────────────────────────
+
+  @Test
+  fun `chat completions 413 when body exceeds 20 MB`() = testApplication {
+    application { farolModule(FakeInferenceEngine(), API_KEY) }
+    // Send an actual body that exceeds 20 MB so Content-Length is real.
+    // Use a JSON string field padded to push the body over the 20 MB threshold.
+    val padding = "x".repeat(20_000_001)
+    val largeBody = """{"messages":[{"role":"user","content":"$padding"}]}"""
+    val resp = client.post("/v1/chat/completions") {
+      header("Authorization", "Bearer $API_KEY")
+      contentType(ContentType.Application.Json)
+      setBody(largeBody)
+    }
+    assertEquals(HttpStatusCode.PayloadTooLarge, resp.status)
+    val err = OpenAIDecoder.decodeFromString<ErrorResponse>(resp.bodyAsText())
+    assertEquals("invalid_request_error", err.error.type)
+    assertTrue(err.error.message.contains("20 MB"), "message=${err.error.message}")
+  }
+
+  @Test
+  fun `chat completions 200 when body is within 20 MB limit`() = testApplication {
+    application { farolModule(FakeInferenceEngine(), API_KEY) }
+    // Body that is under the limit should pass through normally
+    val resp = client.post("/v1/chat/completions") {
+      header("Authorization", "Bearer $API_KEY")
+      contentType(ContentType.Application.Json)
+      setBody("""{"messages":[{"role":"user","content":"hi"}]}""")
+    }
+    assertTrue(resp.status != HttpStatusCode.PayloadTooLarge,
+      "small body should not trigger 413, got ${resp.status}")
+  }
+
   // ── /v1/chat/completions — validation ────────────────────────────────────
 
   @Test
