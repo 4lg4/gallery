@@ -18,6 +18,7 @@ package com.google.ai.edge.gallery
 
 import android.animation.ObjectAnimator
 import android.content.Intent
+import com.google.ai.edge.gallery.farol.FarolService
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -123,6 +124,9 @@ class MainActivity : ComponentActivity() {
 
       contentSet = true
     }
+
+    // FAROL: auto-start inference server; guarded so upstream app never crashes on FAROL errors.
+    try { startForegroundService(Intent(this, FarolService::class.java)) } catch (_: Exception) {}
 
     modelManagerViewModel.loadModelAllowlist()
 
