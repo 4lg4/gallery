@@ -36,6 +36,27 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 
+/**
+ * The channel name used by Gemma 4 to deliver incremental thinking tokens.
+ *
+ * Mirrored from [com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper]:
+ *   `resultListener(message.toString(), false, message.channels["thought"])`
+ *
+ * This is the key into [Message.channels] that the LiteRT-LM runtime populates when the request
+ * carries `extraContext["enable_thinking"] = "true"`.  Do NOT invent a different key — this
+ * constant matches what the runtime actually delivers.
+ */
+private const val THOUGHT_CHANNEL_KEY = "thought"
+
+/**
+ * The extra-context key that activates Gemma 4 thinking mode.
+ *
+ * Mirrored from [com.google.ai.edge.gallery.ui.llmchat.LlmChatViewModel]:
+ *   `val extraContext = if (enableThinking) mapOf("enable_thinking" to "true") else null`
+ * and passed to [com.google.ai.edge.litertlm.Conversation.sendMessageAsync].
+ */
+private const val EXTRA_CONTEXT_ENABLE_THINKING = "enable_thinking"
+
 private const val TAG = "LiteRtLmEngine"
 
 /**
@@ -130,7 +151,8 @@ class LiteRtLmEngine(
     images: List<ByteArray>,
     maxTokens: Int,
     temperature: Float?,
-  ): Flow<String> {
+    thinking: Boolean,
+  ): Flow<StreamChunk> {
     // Validate before returning the flow so IllegalArgumentException is thrown at call site,
     // not deferred to collection time — and without touching the mutex.
     require(prompt.isNotBlank() || images.isNotEmpty()) {
@@ -140,7 +162,7 @@ class LiteRtLmEngine(
     return callbackFlow {
       // Acquire the mutex for the full flow lifetime.
       mutex.lock()
-      Log.d(TAG, "generateStream: acquired mutex, prompt=${prompt.take(80)}...")
+      Log.d(TAG, "generateStream: acquired mutex, prompt=${prompt.take(80)}..., thinking=$thinking")
 
       // Guard: exactly one path may call mutex.unlock().
       val releasedOnce = AtomicBoolean(false)
@@ -161,14 +183,27 @@ class LiteRtLmEngine(
       // Path B: sendMessageAsync setup failure (e.g. buildContents, engine API error).
       try {
         val contents = buildContents(prompt, images)
+        // Mirror LlmChatViewModel.generateResponse: pass extraContext["enable_thinking"]="true"
+        // when thinking is requested.  When false, pass an empty map (no change to prior behaviour).
+        val extraContext = if (thinking) mapOf(EXTRA_CONTEXT_ENABLE_THINKING to "true") else emptyMap()
         conversation.sendMessageAsync(
           contents,
           object : MessageCallback {
             override fun onMessage(message: Message) {
-              // Mirror helper: message.toString() extracts the chunk text.
-              val chunk = message.toString()
-              if (chunk.isNotEmpty()) {
-                trySend(chunk)
+              // Mirror LlmChatModelHelper line 318:
+              //   resultListener(message.toString(), false, message.channels["thought"])
+              //
+              // message.channels["thought"] delivers DELTA text (incremental) on each callback.
+              // When non-null and non-empty, emit a thought chunk first, then the content chunk.
+              // When thinking=false the map will always be empty; this branch is unreachable.
+              val thoughtDelta = message.channels[THOUGHT_CHANNEL_KEY]
+              if (!thoughtDelta.isNullOrEmpty()) {
+                trySend(StreamChunk(thought = thoughtDelta))
+              }
+
+              val contentChunk = message.toString()
+              if (contentChunk.isNotEmpty()) {
+                trySend(StreamChunk(content = contentChunk))
               }
             }
 
@@ -182,7 +217,7 @@ class LiteRtLmEngine(
               close(throwable) // awaitClose will run → Path C
             }
           },
-          emptyMap(),
+          extraContext,
         )
       } catch (e: Exception) {
         Log.e(TAG, "generateStream: sendMessageAsync setup failed", e)
@@ -219,9 +254,11 @@ class LiteRtLmEngine(
     images: List<ByteArray>,
     maxTokens: Int,
     temperature: Float?,
+    thinking: Boolean,
   ): GenerationResult {
-    val chunks = generateStream(prompt, images, maxTokens, temperature).toList()
-    val text = chunks.joinToString("")
+    val chunks = generateStream(prompt, images, maxTokens, temperature, thinking).toList()
+    val text = chunks.mapNotNull { it.content }.joinToString("")
+    val reasoningText = chunks.mapNotNull { it.thought }.joinToString("").takeIf { it.isNotEmpty() }
     // ESTIMATED: LiteRT-LM 0.11.0 does not expose token counts in Message or Engine.
     val promptTokens = (prompt.length / 4).coerceAtLeast(1)
     val completionTokens = (text.length / 4).coerceAtLeast(1)
@@ -229,6 +266,7 @@ class LiteRtLmEngine(
       text = text,
       promptTokens = promptTokens,
       completionTokens = completionTokens,
+      reasoningText = reasoningText,
     )
   }
 

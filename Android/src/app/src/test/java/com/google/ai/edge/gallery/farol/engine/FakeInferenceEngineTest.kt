@@ -16,6 +16,7 @@
 
 package com.google.ai.edge.gallery.farol.engine
 
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
@@ -38,17 +39,23 @@ class FakeInferenceEngineTest {
   }
 
   @Test
-  fun `generateStream emits expected chunks in order`() = runBlocking {
+  fun `generateStream emits expected content chunks in order`() = runBlocking {
     val engine = FakeInferenceEngine(chunks = listOf("Hello", ", ", "world", "!"))
     val collected = engine.generateStream("prompt", emptyList(), 128, null).toList()
-    assertEquals(listOf("Hello", ", ", "world", "!"), collected)
+    assertEquals(
+      listOf("Hello", ", ", "world", "!"),
+      collected.mapNotNull { it.content },
+    )
+    assertTrue(collected.all { it.thought == null }, "no thought chunks expected")
   }
 
   @Test
-  fun `generateStream emits single chunk`() = runBlocking {
+  fun `generateStream emits single content chunk`() = runBlocking {
     val engine = FakeInferenceEngine(chunks = listOf("hi"))
     val collected = engine.generateStream("x", emptyList(), 64, null).toList()
-    assertEquals(listOf("hi"), collected)
+    assertEquals(1, collected.size)
+    assertEquals("hi", collected[0].content)
+    assertEquals(null, collected[0].thought)
   }
 
   @Test
@@ -103,6 +110,65 @@ class FakeInferenceEngineTest {
     assertEquals("my-custom-model", engine.modelName)
   }
 
+  // ── thinking mode tests ───────────────────────────────────────────────────
+
+  @Test
+  fun `generateStream thinking=true emits thought chunks before content chunks`() = runBlocking {
+    val engine = FakeInferenceEngine(
+      chunks = listOf("answer"),
+      thoughtChunks = listOf("think1", "think2"),
+    )
+    val collected = engine.generateStream("prompt", emptyList(), 128, null, thinking = true).toList()
+    val thoughts = collected.filter { it.thought != null }
+    val contents = collected.filter { it.content != null }
+    assertEquals(listOf("think1", "think2"), thoughts.map { it.thought })
+    assertEquals(listOf("answer"), contents.map { it.content })
+    // thought chunks come first (in the order we emit them)
+    val thoughtIndices = collected.indices.filter { collected[it].thought != null }
+    val contentIndices = collected.indices.filter { collected[it].content != null }
+    assertTrue(thoughtIndices.max() < contentIndices.min(), "thought chunks must precede content")
+  }
+
+  @Test
+  fun `generateStream thinking=false emits no thought chunks even when thoughtChunks configured`() = runBlocking {
+    val engine = FakeInferenceEngine(
+      chunks = listOf("answer"),
+      thoughtChunks = listOf("think1"),
+    )
+    val collected = engine.generateStream("prompt", emptyList(), 128, null, thinking = false).toList()
+    assertTrue(collected.all { it.thought == null }, "no thought chunks when thinking=false")
+    assertEquals(listOf("answer"), collected.mapNotNull { it.content })
+  }
+
+  @Test
+  fun `generate thinking=true populates reasoningText`() = runBlocking {
+    val engine = FakeInferenceEngine(
+      chunks = listOf("answer"),
+      thoughtChunks = listOf("step1 ", "step2"),
+    )
+    val result = engine.generate("prompt", emptyList(), 128, null, thinking = true)
+    assertEquals("answer", result.text)
+    assertEquals("step1 step2", result.reasoningText)
+  }
+
+  @Test
+  fun `generate thinking=false has null reasoningText`() = runBlocking {
+    val engine = FakeInferenceEngine(
+      chunks = listOf("answer"),
+      thoughtChunks = listOf("step1"),
+    )
+    val result = engine.generate("prompt", emptyList(), 128, null, thinking = false)
+    assertEquals("answer", result.text)
+    assertEquals(null, result.reasoningText)
+  }
+
+  @Test
+  fun `generate records thinking flag`() = runBlocking {
+    val engine = FakeInferenceEngine()
+    engine.generate("prompt", emptyList(), 64, null, thinking = true)
+    assertEquals(true, engine.lastThinking)
+  }
+
   @Test
   fun `GenerationResult data class equality`() {
     val a = GenerationResult(text = "hi", promptTokens = 1, completionTokens = 2)
@@ -143,11 +209,11 @@ class FakeInferenceEngineTest {
       chunks = listOf("A", "B", "C"),
       throwOnGenerate = boom,
     )
-    val collected = mutableListOf<String>()
+    val collected = mutableListOf<StreamChunk>()
     val thrown = assertFailsWith<IllegalStateException> {
       engine.generateStream("prompt", emptyList(), 64, null).collect { collected.add(it) }
     }
-    assertEquals(listOf("A", "B", "C"), collected)
+    assertEquals(listOf("A", "B", "C"), collected.mapNotNull { it.content })
     assertEquals("mid-stream failure", thrown.message)
   }
 }

@@ -41,6 +41,15 @@ data class ChatCompletionRequest(
   @SerialName("max_tokens") val maxTokens: Int? = null,
   val temperature: Double? = null,
   val stream: Boolean = false,
+  /**
+   * Non-standard extension field.  When true, the server enables Gemma 4 thinking mode and
+   * surfaces the reasoning text in [AssistantMessage.reasoningContent] (batch) or
+   * [Delta.reasoningContent] (streaming).
+   *
+   * Strict OpenAI clients that do not send this field will receive the default value (false) and
+   * behave identically to before this field existed.
+   */
+  val thinking: Boolean = false,
 )
 
 @Serializable
@@ -72,6 +81,13 @@ data class Choice(
 data class AssistantMessage(
   val role: String = "assistant",
   val content: String,
+  /**
+   * Accumulated reasoning/thinking text, following the DeepSeek convention.
+   * Null when thinking was not requested or produced no output.
+   * Harnesses that consume DeepSeek-style responses (e.g. open-webui) already understand this
+   * field without any changes on their side.
+   */
+  @SerialName("reasoning_content") val reasoningContent: String? = null,
 )
 
 @Serializable
@@ -103,6 +119,11 @@ data class ChunkChoice(
 data class Delta(
   val role: String? = null,
   val content: String? = null,
+  /**
+   * Incremental reasoning/thinking token, following the DeepSeek convention.
+   * Null on all non-thinking chunks and when thinking=false was requested.
+   */
+  @SerialName("reasoning_content") val reasoningContent: String? = null,
 )
 
 // ── Models list ───────────────────────────────────────────────────────────────

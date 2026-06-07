@@ -26,16 +26,22 @@ import kotlinx.coroutines.flow.flow
  *
  * Reused across Task 4 route tests.
  *
- * @param chunks Text fragments emitted by [generateStream].  Joined for [generate].
+ * @param chunks Text fragments emitted as content [StreamChunk]s by [generateStream].  Joined for
+ *   [generate].
+ * @param thoughtChunks Optional thought fragments interleaved before content chunks when
+ *   thinking=true is passed.  Each element is emitted as a [StreamChunk] with only
+ *   [StreamChunk.thought] set.  When empty (default) no thought chunks are emitted even when
+ *   thinking=true, so existing tests are unaffected.
  * @param promptTokensOverride If set, used as [GenerationResult.promptTokens]; else estimated.
  * @param completionTokensOverride If set, used as [GenerationResult.completionTokens]; else
  *   estimated.
- * @param throwOnGenerate When non-null, [generateStream] emits all [chunks] then throws this
+ * @param throwOnGenerate When non-null, [generateStream] emits all chunks then throws this
  *   throwable (closing the flow with the error), and [generate] throws it immediately after
  *   recording the call arguments.
  */
 class FakeInferenceEngine(
   private val chunks: List<String> = listOf("Hello", ", ", "world", "!"),
+  private val thoughtChunks: List<String> = emptyList(),
   private val promptTokensOverride: Int? = null,
   private val completionTokensOverride: Int? = null,
   override val modelName: String = "fake-model",
@@ -51,6 +57,8 @@ class FakeInferenceEngine(
     private set
   var lastTemperature: Float? = null
     private set
+  var lastThinking: Boolean? = null
+    private set
 
   var closeCalled = false
     private set
@@ -60,16 +68,26 @@ class FakeInferenceEngine(
     images: List<ByteArray>,
     maxTokens: Int,
     temperature: Float?,
-  ): Flow<String> {
-    record(prompt, images, maxTokens, temperature)
+    thinking: Boolean,
+  ): Flow<StreamChunk> {
+    record(prompt, images, maxTokens, temperature, thinking)
     val error = throwOnGenerate
     return if (error != null) {
       flow {
-        chunks.forEach { emit(it) }
+        // Emit thought chunks first (if any) when thinking is on, then content, then throw.
+        if (thinking) {
+          thoughtChunks.forEach { emit(StreamChunk(thought = it)) }
+        }
+        chunks.forEach { emit(StreamChunk(content = it)) }
         throw error
       }
     } else {
-      chunks.asFlow()
+      flow {
+        if (thinking) {
+          thoughtChunks.forEach { emit(StreamChunk(thought = it)) }
+        }
+        chunks.forEach { emit(StreamChunk(content = it)) }
+      }
     }
   }
 
@@ -78,14 +96,19 @@ class FakeInferenceEngine(
     images: List<ByteArray>,
     maxTokens: Int,
     temperature: Float?,
+    thinking: Boolean,
   ): GenerationResult {
-    record(prompt, images, maxTokens, temperature)
+    record(prompt, images, maxTokens, temperature, thinking)
     throwOnGenerate?.let { throw it }
     val text = chunks.joinToString("")
+    val reasoningText = if (thinking && thoughtChunks.isNotEmpty()) {
+      thoughtChunks.joinToString("")
+    } else null
     return GenerationResult(
       text = text,
       promptTokens = promptTokensOverride ?: (prompt.length / 4).coerceAtLeast(1),
       completionTokens = completionTokensOverride ?: (text.length / 4).coerceAtLeast(1),
+      reasoningText = reasoningText,
     )
   }
 
@@ -93,10 +116,11 @@ class FakeInferenceEngine(
     closeCalled = true
   }
 
-  private fun record(prompt: String, images: List<ByteArray>, maxTokens: Int, temperature: Float?) {
+  private fun record(prompt: String, images: List<ByteArray>, maxTokens: Int, temperature: Float?, thinking: Boolean) {
     lastPrompt = prompt
     lastImages = images
     lastMaxTokens = maxTokens
     lastTemperature = temperature
+    lastThinking = thinking
   }
 }

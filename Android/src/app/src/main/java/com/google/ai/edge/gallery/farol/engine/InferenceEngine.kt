@@ -19,16 +19,34 @@ package com.google.ai.edge.gallery.farol.engine
 import kotlinx.coroutines.flow.Flow
 
 /**
+ * A single streaming chunk from [InferenceEngine.generateStream].
+ *
+ * Exactly one of [content] / [thought] will be non-null per chunk; both may be null only for the
+ * terminal sentinel (an implementation detail — callers should ignore all-null chunks).
+ *
+ * @property content Incremental assistant text token (null when this chunk carries a thought).
+ * @property thought Incremental thinking token from the "thought" channel (null for regular content
+ *   chunks).  Only populated when thinking=true was requested.
+ */
+data class StreamChunk(
+  val content: String? = null,
+  val thought: String? = null,
+)
+
+/**
  * Result of a complete (non-streaming) generation request.
  *
  * @property text The generated text.
  * @property promptTokens Number of tokens in the input prompt.
  * @property completionTokens Number of tokens in the generated completion.
+ * @property reasoningText Accumulated thinking/reasoning text from the "thought" channel, or null
+ *   when thinking was not enabled for this request.
  */
 data class GenerationResult(
   val text: String,
   val promptTokens: Int,
   val completionTokens: Int,
+  val reasoningText: String? = null,
 )
 
 /**
@@ -55,6 +73,9 @@ interface InferenceEngine : java.io.Closeable {
    * @param maxTokens Maximum number of tokens to generate.  Best-effort: the implementation may
    *   apply this cap at engine-init time rather than per-request (see concrete class KDoc).
    * @param temperature Sampling temperature, or null to use the engine default.
+   * @param thinking When true, enables Gemma 4 thinking mode; [GenerationResult.reasoningText] will
+   *   be populated with the accumulated "thought" channel output.  When false (default),
+   *   [GenerationResult.reasoningText] is null and behaviour is identical to prior versions.
    * @return [GenerationResult] with the generated text and token counts.
    */
   suspend fun generate(
@@ -62,14 +83,16 @@ interface InferenceEngine : java.io.Closeable {
     images: List<ByteArray>,
     maxTokens: Int,
     temperature: Float?,
+    thinking: Boolean = false,
   ): GenerationResult
 
   /**
    * Streaming generation.
    *
-   * Emits text chunks as they arrive from the model.  The flow completes normally when generation
-   * ends, or with an exception on error.  Cancelling the collecting coroutine cancels the
-   * underlying inference.
+   * Emits [StreamChunk]s as they arrive from the model.  Each chunk carries either a content delta
+   * ([StreamChunk.content]) or a thought delta ([StreamChunk.thought]) — never both in the same
+   * chunk.  The flow completes normally when generation ends, or with an exception on error.
+   * Cancelling the collecting coroutine cancels the underlying inference.
    *
    * Implementations hold the single-flight mutex for the flow's entire lifetime.
    *
@@ -78,14 +101,18 @@ interface InferenceEngine : java.io.Closeable {
    * @param maxTokens Maximum number of tokens to generate.  Best-effort: the implementation may
    *   apply this cap at engine-init time rather than per-request (see concrete class KDoc).
    * @param temperature Sampling temperature, or null to use the engine default.
-   * @return [Flow] of text chunks.
+   * @param thinking When true, enables Gemma 4 thinking mode; [StreamChunk.thought] chunks will be
+   *   interleaved with [StreamChunk.content] chunks.  When false (default), all chunks carry only
+   *   [StreamChunk.content] and behaviour is identical to prior versions.
+   * @return [Flow] of [StreamChunk]s.
    */
   fun generateStream(
     prompt: String,
     images: List<ByteArray>,
     maxTokens: Int,
     temperature: Float?,
-  ): Flow<String>
+    thinking: Boolean = false,
+  ): Flow<StreamChunk>
 
   /**
    * Releases all native resources held by this engine.

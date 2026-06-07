@@ -47,6 +47,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
+import com.google.ai.edge.gallery.farol.engine.StreamChunk
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -129,12 +130,12 @@ fun Routing.chatCompletionsRoute(engine: InferenceEngine, apiKey: String, metric
 
     // ── Stream or Batch ───────────────────────────────────────────────────────
     if (request.stream) {
-      call.respondSSE(engine, flat, maxTokens, temperature, responseId, created, modelName, metrics)
+      call.respondSSE(engine, flat, maxTokens, temperature, request.thinking, responseId, created, modelName, metrics)
     } else {
       val startMs = System.currentTimeMillis()
       var engineError = false
       try {
-        val result = engine.generate(flat.promptText, flat.images, maxTokens, temperature)
+        val result = engine.generate(flat.promptText, flat.images, maxTokens, temperature, request.thinking)
         call.respond(
           HttpStatusCode.OK,
           ChatCompletionResponse(
@@ -143,7 +144,10 @@ fun Routing.chatCompletionsRoute(engine: InferenceEngine, apiKey: String, metric
             model = modelName,
             choices = listOf(
               Choice(
-                message = AssistantMessage(content = result.text),
+                message = AssistantMessage(
+                  content = result.text,
+                  reasoningContent = result.reasoningText,
+                ),
                 finishReason = "stop",
               )
             ),
@@ -173,6 +177,7 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
   flat: PromptFlattener.FlatPrompt,
   maxTokens: Int,
   temperature: Float?,
+  thinking: Boolean,
   responseId: String,
   created: Long,
   modelName: String,
@@ -210,8 +215,17 @@ private suspend fun io.ktor.server.application.ApplicationCall.respondSSE(
     // finally marks it as an error, then re-thrown so the coroutine machinery
     // can clean up correctly.
     try {
-      engine.generateStream(flat.promptText, flat.images, maxTokens, temperature)
-        .onEach { text -> sendChunk(makeChunk(Delta(content = text))) }
+      engine.generateStream(flat.promptText, flat.images, maxTokens, temperature, thinking)
+        .onEach { chunk: StreamChunk ->
+          when {
+            chunk.thought != null ->
+              // Emit a reasoning_content delta; content is null for thought chunks.
+              sendChunk(makeChunk(Delta(reasoningContent = chunk.thought)))
+            chunk.content != null ->
+              sendChunk(makeChunk(Delta(content = chunk.content)))
+            // All-null chunk (should not occur in practice) — skip silently.
+          }
+        }
         .catch { e ->
           streamError = e
         }
