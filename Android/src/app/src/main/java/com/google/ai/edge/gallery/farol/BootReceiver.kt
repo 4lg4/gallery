@@ -24,7 +24,15 @@ import android.util.Log
 private const val TAG = "BootReceiver"
 
 /**
- * FAROL — Starts [FarolService] after device boot.
+ * FAROL — Starts [FarolService] after device boot **or** after an APK reinstall.
+ *
+ * ## Handled broadcasts
+ * - `android.intent.action.BOOT_COMPLETED` — device finished booting.
+ * - `android.intent.action.MY_PACKAGE_REPLACED` — this APK was just updated.  Android delivers
+ *   this action *only* to the replaced app, so no `<data>` filter is needed in the manifest.
+ *
+ * The decision of which actions trigger a start is delegated to [AutoStartPolicy.shouldStartService]
+ * so it can be tested independently of the Android runtime.
  *
  * ## Battery-optimisation exemption required for API 35+
  * Android 15 (API 35) restricts foreground-service starts from
@@ -38,23 +46,24 @@ private const val TAG = "BootReceiver"
  * [android.app.ForegroundServiceStartNotAllowedException] (a subclass of
  * [IllegalStateException]) on API 35+.  The call is wrapped in a try/catch so
  * a missing exemption produces a clear log instead of a silent crash.
- *
- * TODO: Task 2 — gate on a user preference before auto-starting.
  */
 class BootReceiver : BroadcastReceiver() {
 
   override fun onReceive(context: Context, intent: Intent) {
-    if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+    if (AutoStartPolicy.shouldStartService(intent.action)) {
+      Log.i(TAG, "onReceive: action=${intent.action} — starting FarolService")
       try {
         context.startForegroundService(Intent(context, FarolService::class.java))
+        // Also (re-)arm the periodic watchdog so it is always running after boot / reinstall.
+        FarolWatchdogWorker.schedule(context)
       } catch (e: IllegalStateException) {
         // ForegroundServiceStartNotAllowedException (API 35+) is thrown when the app is
         // not on the battery-optimisation allowlist.  Grant the exemption with:
         //   adb shell dumpsys deviceidle whitelist +com.google.aiedge.gallery
         Log.e(
           TAG,
-          "Cannot start FarolService from boot — grant battery-optimisation exemption: " +
-            "adb shell dumpsys deviceidle whitelist +com.google.aiedge.gallery",
+          "Cannot start FarolService from ${intent.action} — grant battery-optimisation " +
+            "exemption: adb shell dumpsys deviceidle whitelist +com.google.aiedge.gallery",
           e,
         )
       }

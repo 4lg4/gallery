@@ -37,6 +37,8 @@
 
     <!-- FAROL — LAN LLM inference server -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Required for AlarmManager.setExactAndAllowWhileIdle used by onTaskRemoved restart -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!-- Additional permission required for push notification handling -->
     <!-- Required for resurfacing notifications after boot -->
@@ -177,8 +179,14 @@
         <receiver
             android:name=".farol.BootReceiver"
             android:exported="true">
+            <!-- Start FAROL after device boot -->
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+            <!-- Re-start FAROL after APK reinstall / update.  MY_PACKAGE_REPLACED is delivered
+                 only to the replaced app; no <data> filter is needed. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
     </application>

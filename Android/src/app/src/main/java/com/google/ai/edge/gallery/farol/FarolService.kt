@@ -17,14 +17,17 @@
 package com.google.ai.edge.gallery.farol
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import com.google.ai.edge.gallery.farol.engine.LiteRtLmEngine
 import com.google.ai.edge.gallery.farol.engine.ModelLocator
@@ -82,8 +85,29 @@ private const val PORT = 8080
  * ## Idempotency
  * [onStartCommand] checks [started] before launching the startup coroutine.  Double-starts from
  * [BootReceiver] + [MainActivity] are safe and simply return [START_STICKY].
+ *
+ * ## Resilience
+ * - [onTaskRemoved] schedules an [AlarmManager] one-shot to restart the service ~2 s after a
+ *   recents-swipe so inference is automatically re-armed.
+ * - [FarolWatchdogWorker] runs every 15 minutes and restarts the service if [isRunning] is
+ *   `false`.  FORCE STOP remains unfixable by Android design.
  */
 class FarolService : Service() {
+
+  companion object {
+    private const val CHANNEL_ID = "farol_server"
+    private const val NOTIFICATION_ID = 1001
+
+    /**
+     * Process-local liveness flag.  Set `true` at the end of successful startup (after the Ktor
+     * server is assigned and the notification updated), cleared to `false` in [onDestroy].
+     *
+     * Read by [FarolWatchdogWorker] to decide whether a restart is needed.  Volatile guarantees
+     * visibility across threads without heavier synchronisation overhead.
+     */
+    @Volatile var isRunning: Boolean = false
+      private set
+  }
 
   // ── Service scope (cancelled in onDestroy) ───────────────────────────────
 
@@ -129,6 +153,11 @@ class FarolService : Service() {
     wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "farol:server").also {
       it.acquire()
     }
+
+    // Arm the periodic watchdog so it is running even if BootReceiver was not the entry point
+    // (e.g. the user launched the app from the launcher after a FORCE STOP recovery).
+    // Idempotent via ExistingPeriodicWorkPolicy.KEEP.
+    FarolWatchdogWorker.schedule(this)
 
     startupJob = scope.launch {
       try {
@@ -195,6 +224,11 @@ class FarolService : Service() {
         updateNotification(
           ServiceState.NotificationState.Serving(PORT, liteRtEngine.modelName)
         )
+
+        // Mark the service as running AFTER the notification update so that the watchdog
+        // only sees isRunning=true when the server is fully operational.
+        isRunning = true
+        Log.d(TAG, "Startup complete — isRunning set to true")
       } catch (e: Exception) {
         val msg = e.message ?: e.javaClass.simpleName
         Log.e(TAG, "Startup failed: $msg", e)
@@ -206,9 +240,40 @@ class FarolService : Service() {
     return START_STICKY
   }
 
+  /**
+   * Called when the user swipes the app from the recents screen.
+   *
+   * Schedules an [AlarmManager] one-shot via [PendingIntent.getForegroundService] to restart
+   * [FarolService] after [RestartScheduler.restartDelayMillis].  The alarm fires even while the
+   * device is idle because [AlarmManager.setExactAndAllowWhileIdle] is used and the app is on the
+   * deviceidle whitelist.
+   *
+   * FORCE STOP is intentionally **not** handled here — Android puts the app in the
+   * package-stopped state after a FORCE STOP, which silences all receivers, alarms, and WorkManager
+   * jobs until the user manually relaunches the app.
+   */
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    super.onTaskRemoved(rootIntent)
+    Log.i(TAG, "onTaskRemoved — scheduling restart in ${RestartScheduler.restartDelayMillis()} ms")
+
+    val restartIntent = PendingIntent.getForegroundService(
+      this,
+      0,
+      Intent(this, FarolService::class.java),
+      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+    val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    alarmManager.setExactAndAllowWhileIdle(
+      AlarmManager.ELAPSED_REALTIME_WAKEUP,
+      SystemClock.elapsedRealtime() + RestartScheduler.restartDelayMillis(),
+      restartIntent,
+    )
+  }
+
   override fun onDestroy() {
     super.onDestroy()
-    Log.d(TAG, "onDestroy — cancelling scope")
+    isRunning = false
+    Log.d(TAG, "onDestroy — isRunning cleared, cancelling scope")
 
     // Cancel the startup job first so the in-coroutine isActive gates fire and self-clean any
     // objects created after this thread's field snapshot below.  We do NOT join/await here
@@ -273,8 +338,4 @@ class FarolService : Service() {
     manager.notify(NOTIFICATION_ID, notification)
   }
 
-  companion object {
-    private const val CHANNEL_ID = "farol_server"
-    private const val NOTIFICATION_ID = 1001
-  }
 }
