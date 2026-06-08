@@ -105,13 +105,13 @@ class FarolService : Service() {
      * 4096, which is too small to hold an agent harness's prompt (e.g. opencode's system prompt +
      * tool schemas run ~5–6k tokens) and caused "input tokens too long" rejections.
      *
-     * 12288 gives comfortable headroom for those callers while keeping the cost sane: LiteRT-LM
-     * provisions the KV cache to THIS cap at engine-init (it is not grown on demand), so a larger
-     * value pre-commits more RAM and slows prefill even for small requests. 12k is the balance for
-     * a 4B model on a 16 GB device (≈1.5–2 GB KV) coexisting with the Termux Whisper workload.
-     * Raise only if a real caller needs longer documents.
+     * 16384 (16k). 32k crash-loops even with ~6 GB free RAM — the .litertlm file's compiled max
+     * context (or a GPU KV-alloc limit) sits between 12k and 32k, so RAM is not the gate above 12k.
+     * 16k is a confirmed-safe bump: FAROL ~8.5 GB, comfortable margin, still coexists with the
+     * Termux Whisper workload. LiteRT-LM provisions the KV cache to THIS cap at engine-init (not
+     * grown on demand). The exact ceiling between 16k and 32k is unprobed.
      */
-    private const val MAX_TOKENS = 12288
+    private const val MAX_TOKENS = 16384
     // Unique request code for the onTaskRemoved restart PendingIntent. Must be non-zero and
     // distinct from any other PendingIntent used in this service to avoid clobbering.
     private const val RESTART_ALARM_REQUEST_CODE = 7829
