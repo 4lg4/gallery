@@ -37,7 +37,9 @@
 
     <!-- FAROL — LAN LLM inference server -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- Required for AlarmManager.setExactAndAllowWhileIdle used by onTaskRemoved restart -->
+    <!-- Required for AlarmManager.setExactAndAllowWhileIdle used by onTaskRemoved restart.
+         Note: SCHEDULE_EXACT_ALARM is user-revocable on Android 12+ (API 31+); the onTaskRemoved
+         inexact-alarm fallback in FarolService handles the case where the user revokes it. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!-- Additional permission required for push notification handling -->

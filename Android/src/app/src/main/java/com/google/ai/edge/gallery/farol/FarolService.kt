@@ -25,7 +25,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
@@ -98,6 +97,9 @@ class FarolService : Service() {
   companion object {
     private const val CHANNEL_ID = "farol_server"
     private const val NOTIFICATION_ID = 1001
+    // Unique request code for the onTaskRemoved restart PendingIntent. Must be non-zero and
+    // distinct from any other PendingIntent used in this service to avoid clobbering.
+    private const val RESTART_ALARM_REQUEST_CODE = 7829
 
     /**
      * Process-local liveness flag.  Set `true` at the end of successful startup (after the Ktor
@@ -255,31 +257,30 @@ class FarolService : Service() {
    */
   override fun onTaskRemoved(rootIntent: Intent?) {
     super.onTaskRemoved(rootIntent)
-    Log.i(TAG, "onTaskRemoved — scheduling restart in ${RestartScheduler.restartDelayMillis()} ms")
+    Log.i(TAG, "onTaskRemoved — scheduling restart in ${RestartScheduler.RESTART_DELAY_MILLIS} ms")
 
     val restartIntent = PendingIntent.getForegroundService(
       this,
-      0,
+      RESTART_ALARM_REQUEST_CODE,
       Intent(this, FarolService::class.java),
       PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
-    val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val triggerAt = SystemClock.elapsedRealtime() + RestartScheduler.restartDelayMillis()
-    val canExact = Build.VERSION.SDK_INT < 31 || alarmManager.canScheduleExactAlarms()
-    try {
-      if (canExact) {
-        alarmManager.setExactAndAllowWhileIdle(
-          AlarmManager.ELAPSED_REALTIME_WAKEUP,
-          triggerAt,
-          restartIntent,
-        )
-      } else {
-        alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartIntent)
-      }
-    } catch (e: SecurityException) {
-      Log.w(TAG, "exact alarm denied, falling back to inexact", e)
-      alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartIntent)
+    val alarmManager = getSystemService(AlarmManager::class.java)
+    if (alarmManager == null) {
+      Log.e(TAG, "onTaskRemoved: AlarmManager unavailable — restart alarm not scheduled")
+      return
     }
+    val triggerAt = SystemClock.elapsedRealtime() + RestartScheduler.RESTART_DELAY_MILLIS
+    // SCHEDULE_EXACT_ALARM is user-revocable (Android 12+); fall back to inexact if denied.
+    val canExact = alarmManager.canScheduleExactAlarms()
+    val scheduled = if (canExact) runCatching {
+      alarmManager.setExactAndAllowWhileIdle(
+        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+        triggerAt,
+        restartIntent,
+      )
+    }.isSuccess else false
+    if (!scheduled) alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartIntent)
   }
 
   override fun onDestroy() {

@@ -54,7 +54,10 @@ class BootReceiver : BroadcastReceiver() {
       Log.i(TAG, "onReceive: action=${intent.action} — starting FarolService")
       try {
         context.startForegroundService(Intent(context, FarolService::class.java))
-        // Also (re-)arm the periodic watchdog so it is always running after boot / reinstall.
+        // Also (re-)arm the periodic watchdog here.  Belt-and-suspenders: FarolService.onStartCommand
+        // calls schedule() too, but on some devices the foreground-service start is async and the
+        // watchdog window between boot and onStartCommand is a real gap.  The call is idempotent
+        // (ExistingPeriodicWorkPolicy.KEEP), so the double-schedule is harmless.
         FarolWatchdogWorker.schedule(context)
       } catch (e: IllegalStateException) {
         // ForegroundServiceStartNotAllowedException (API 35+) is thrown when the app is

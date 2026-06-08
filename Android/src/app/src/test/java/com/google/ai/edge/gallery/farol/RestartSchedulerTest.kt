@@ -17,24 +17,12 @@
 package com.google.ai.edge.gallery.farol
 
 import kotlin.test.Test
-import kotlin.test.assertTrue
+import kotlin.test.assertEquals
 
 class RestartSchedulerTest {
 
   @Test
-  fun `restartDelayMillis is positive`() {
-    assertTrue(RestartScheduler.restartDelayMillis() > 0L)
-  }
-
-  @Test
-  fun `restartDelayMillis is at least 1 second`() {
-    // Must be long enough for the system to settle after the task is swiped away.
-    assertTrue(RestartScheduler.restartDelayMillis() >= 1_000L)
-  }
-
-  @Test
-  fun `restartDelayMillis is at most 10 seconds`() {
-    // Should be short enough to feel instant to a user waiting for inference.
-    assertTrue(RestartScheduler.restartDelayMillis() <= 10_000L)
+  fun `RESTART_DELAY_MILLIS is exactly 2 seconds`() {
+    assertEquals(2_000L, RestartScheduler.RESTART_DELAY_MILLIS)
   }
 }

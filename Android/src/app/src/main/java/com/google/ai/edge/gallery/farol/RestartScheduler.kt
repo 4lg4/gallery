@@ -31,5 +31,5 @@ object RestartScheduler {
    * 2 seconds is long enough for the system to finish tearing down the task but short enough to
    * feel instantaneous to a user waiting for LAN inference to return.
    */
-  fun restartDelayMillis(): Long = 2_000L
+  const val RESTART_DELAY_MILLIS: Long = 2_000L
 }

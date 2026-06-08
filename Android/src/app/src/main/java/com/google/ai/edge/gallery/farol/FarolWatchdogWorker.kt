@@ -35,6 +35,10 @@ private const val TAG = "FarolWatchdogWorker"
  * [FarolService.isRunning] flag and, if [FarolWatchdog.shouldRestart] indicates the service has
  * stopped, issues a new `startForegroundService` call to bring it back.
  *
+ * When the service process itself was killed by the OS, this Worker executes in a fresh process
+ * where [FarolService.isRunning] is initialised to `false`, so [FarolWatchdog.shouldRestart]
+ * returns `true` and the restart fires correctly — no persistence is needed.
+ *
  * This is a *defence-in-depth* measure against organic kills (low memory, doze, etc.).  It does
  * **not** help after a FORCE STOP — Android prevents any automatic restart from the
  * package-stopped state until the user manually launches the app.
