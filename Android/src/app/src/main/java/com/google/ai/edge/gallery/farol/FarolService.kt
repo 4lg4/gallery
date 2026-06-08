@@ -25,6 +25,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
@@ -263,11 +264,22 @@ class FarolService : Service() {
       PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
     val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    alarmManager.setExactAndAllowWhileIdle(
-      AlarmManager.ELAPSED_REALTIME_WAKEUP,
-      SystemClock.elapsedRealtime() + RestartScheduler.restartDelayMillis(),
-      restartIntent,
-    )
+    val triggerAt = SystemClock.elapsedRealtime() + RestartScheduler.restartDelayMillis()
+    val canExact = Build.VERSION.SDK_INT < 31 || alarmManager.canScheduleExactAlarms()
+    try {
+      if (canExact) {
+        alarmManager.setExactAndAllowWhileIdle(
+          AlarmManager.ELAPSED_REALTIME_WAKEUP,
+          triggerAt,
+          restartIntent,
+        )
+      } else {
+        alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartIntent)
+      }
+    } catch (e: SecurityException) {
+      Log.w(TAG, "exact alarm denied, falling back to inexact", e)
+      alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartIntent)
+    }
   }
 
   override fun onDestroy() {
