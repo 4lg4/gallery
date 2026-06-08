@@ -97,6 +97,21 @@ class FarolService : Service() {
   companion object {
     private const val CHANNEL_ID = "farol_server"
     private const val NOTIFICATION_ID = 1001
+
+    /**
+     * Engine-level token budget (input + output) passed to [LiteRtLmEngine.initMaxTokens].
+     *
+     * Gemma 4 E4B is trained for 32k context; the LiteRT-LM library default is a conservative
+     * 4096, which is too small to hold an agent harness's prompt (e.g. opencode's system prompt +
+     * tool schemas run ~5–6k tokens) and caused "input tokens too long" rejections.
+     *
+     * 12288 gives comfortable headroom for those callers while keeping the cost sane: LiteRT-LM
+     * provisions the KV cache to THIS cap at engine-init (it is not grown on demand), so a larger
+     * value pre-commits more RAM and slows prefill even for small requests. 12k is the balance for
+     * a 4B model on a 16 GB device (≈1.5–2 GB KV) coexisting with the Termux Whisper workload.
+     * Raise only if a real caller needs longer documents.
+     */
+    private const val MAX_TOKENS = 12288
     // Unique request code for the onTaskRemoved restart PendingIntent. Must be non-zero and
     // distinct from any other PendingIntent used in this service to avoid clobbering.
     private const val RESTART_ALARM_REQUEST_CODE = 7829
@@ -197,6 +212,7 @@ class FarolService : Service() {
         val liteRtEngine = LiteRtLmEngine(
           modelPath = modelFile.absolutePath,
           modelDisplayName = ModelLocator.MODEL_NAME,
+          initMaxTokens = MAX_TOKENS,
         )
         // Race gate A: onDestroy may have fired during the blocking init above.
         // Self-clean before touching any shared field so the teardown thread's snapshot is safe.
