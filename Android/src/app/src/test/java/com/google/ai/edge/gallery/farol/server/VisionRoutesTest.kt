@@ -222,7 +222,7 @@ class VisionRoutesTest {
       }))
     }
     assertEquals(256, fake.lastMaxTokens, "maxTokens should be 256")
-    assertEquals(0.3f, fake.lastTemperature, "temperature should be 0.3")
+    assertEquals(0f, fake.lastTemperature, "vision is extraction-style: greedy (temperature 0)")
   }
 
   // ── /caption — error cases ────────────────────────────────────────────────

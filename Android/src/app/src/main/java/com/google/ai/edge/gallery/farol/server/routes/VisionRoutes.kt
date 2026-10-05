@@ -36,7 +36,8 @@ import io.ktor.utils.io.toByteArray
 
 private const val CAPTION_DEFAULT_PROMPT = "Describe this image in 2-3 concise sentences."
 private const val VISION_MAX_TOKENS = 256
-private const val VISION_TEMPERATURE = 0.3f
+// Greedy decoding: /caption and /vqa are extraction-style calls where a stable answer beats variety.
+private const val VISION_TEMPERATURE = 0f
 
 /**
  * Parsed result of a multipart vision request.
